@@ -148,25 +148,32 @@ def generate_briefing(market_info, news_headlines, top_risers, top_fallers):
     return fallback_text
 
 def send_telegram(text):
-    """5. 텔레그램 발송"""
-    bot_token = os.environ["TELEGRAM_TOKEN"]
-    chat_id = os.environ["TELEGRAM_CHAT_ID"]
+    """5. 텔레그램 발송 (응답 상태 검증 및 실패 시 일반 텍스트 재전송)"""
+    bot_token = os.environ.get("TELEGRAM_TOKEN", "").strip()
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    
+
+    def _send_part(content):
+        # 1차 시도: Markdown 모드로 전송
+        payload = {"chat_id": chat_id, "text": content, "parse_mode": "Markdown"}
+        res = requests.post(url, json=payload)
+        
+        # 특수문자 마크다운 파싱 에러(400 Bad Request) 발생 시 일반 텍스트로 즉시 재전송
+        if res.status_code != 200:
+            print(f"Markdown 파싱 실패로 일반 텍스트 모드로 재전송합니다. (이유: {res.text})")
+            payload_plain = {"chat_id": chat_id, "text": content}
+            res = requests.post(url, json=payload_plain)
+
+        print(f"텔레그램 응답: {res.status_code}, {res.text}")
+        
+        # 그래도 실패하면 에러를 발생시켜 GitHub 로그에 정확한 이유 출력
+        if res.status_code != 200:
+            raise RuntimeError(f"텔레그램 발송 최종 실패: {res.text}")
+
+    # 4000자 초과 분할 처리
     if len(text) > 4000:
         parts = [text[i:i+4000] for i in range(0, len(text), 4000)]
         for part in parts:
-            payload = {"chat_id": chat_id, "text": part, "parse_mode": "Markdown"}
-            requests.post(url, json=payload)
+            _send_part(part)
     else:
-        payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
-        requests.post(url, json=payload)
-
-if __name__ == "__main__":
-    market_info = get_market_indices()
-    news_headlines = get_market_news(limit=5)
-    top_risers = get_top_movers(mode="rise", limit=10)
-    top_fallers = get_top_movers(mode="fall", limit=10)
-    
-    briefing = generate_briefing(market_info, news_headlines, top_risers, top_fallers)
-    send_telegram(briefing)
+        _send_part(text)
