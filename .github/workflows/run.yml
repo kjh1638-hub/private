@@ -24,7 +24,7 @@ jobs:
       # 3. 필요한 파이썬 라이브러리 자동 설치
       - name: Install dependencies
         run: |
-          pip install requests beautifulsoup4 google-genai pykrx pandas
+          pip install requests beautifulsoup4 google-genai pandas lxml
 
       # 4. 저장해 둔 비밀키(토큰/API Key)를 불러와 main.py 실행
       - name: Run script
