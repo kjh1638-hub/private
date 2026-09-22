@@ -113,7 +113,7 @@ def generate_briefing(market_info, news_headlines, top_risers, top_fallers):
       5. 💡 **내일장 체크포인트** (1~2줄 핵심)
     """
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-3.6-flash",
         contents=prompt
     )
     return response.text
