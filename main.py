@@ -1,4 +1,5 @@
 import os
+import time
 import requests
 from google import genai
 from bs4 import BeautifulSoup
@@ -6,7 +7,7 @@ from bs4 import BeautifulSoup
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
 def get_market_indices():
-    """1. 네이버 금융 공식 시세 API에서 코스피/코스닥 지수 수집 (HTML 파싱 에러 방지)"""
+    """1. 네이버 공식 API에서 코스피/코스닥 지수 수집"""
     try:
         url = "https://polling.finance.naver.com/api/realtime/domestic/index/KOSPI,KOSDAQ"
         res = requests.get(url, headers=HEADERS, timeout=10)
@@ -20,14 +21,14 @@ def get_market_indices():
             change = item.get("compareToPreviousClosePrice", "")
             rate = item.get("fluctuationsRatio", "")
             direction = "+" if item.get("compareToPreviousPrice", {}).get("name") == "RISING" else "-"
-            indices.append(f"{name}: {price}pt ({direction}{rate}%, {direction}{change}pt)")
+            indices.append(f"*{name}*: {price}pt ({direction}{rate}%, {direction}{change}pt)")
             
-        return " / ".join(indices) if indices else "지수 정보를 가져올 수 없습니다."
-    except Exception as e:
+        return " / ".join(indices) if indices else "지수 정보 없음"
+    except Exception:
         return "지수 수집 일시 오류"
 
-def get_market_news(limit=6):
-    """2. 네이버 증권 실시간 주요 뉴스 헤드라인 수집"""
+def get_market_news(limit=5):
+    """2. 실시간 주요 뉴스 헤드라인 수집"""
     try:
         url = "https://finance.naver.com/news/mainnews.naver"
         res = requests.get(url, headers=HEADERS, timeout=10)
@@ -41,13 +42,13 @@ def get_market_news(limit=6):
             if len(news_titles) >= limit:
                 break
                 
-        formatted_news = [f"- {title}" for title in news_titles]
+        formatted_news = [f"• {title}" for title in news_titles]
         return "\n".join(formatted_news) if formatted_news else "주요 뉴스 없음"
     except Exception:
         return "뉴스 수집 일시 오류"
 
 def get_top_movers(mode="rise", limit=10):
-    """3. 상승률(rise) 및 하락률(fall) 상위 10개 종목 수집"""
+    """3. 상승률 / 하락률 상위 10위 수집"""
     results = []
     for sosok in [0, 1]:  # 0: 코스피, 1: 코스닥
         market_name = "코스피" if sosok == 0 else "코스닥"
@@ -86,14 +87,8 @@ def get_top_movers(mode="rise", limit=10):
     formatted = [f"{i+1}. [{item['market']}] {item['name']} ({item['rate_str']})" for i, item in enumerate(top_list)]
     return "\n".join(formatted) if formatted else "종목 데이터 없음"
 
-import time
-
-import time
-
 def generate_briefing(market_info, news_headlines, top_risers, top_fallers):
-    """4. 최신 Google GenAI SDK를 사용하여 브리핑 생성 (점진적 대기 재시도 적용)"""
-    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-    
+    """4. AI 브리핑 생성 (실패 시 원본 데이터 기반 기본 브리핑 자동 대체)"""
     prompt = f"""
     당신은 전문 증권사 PB이자 시황 애널리스트입니다.
     아래 수집된 지수, 주요 헤드라인 뉴스, 상/하락 10위 종목 데이터를 종합 분석하여 텔레그램용 마감 브리핑을 작성해주세요.
@@ -110,37 +105,54 @@ def generate_briefing(market_info, news_headlines, top_risers, top_fallers):
     [출력 요구사항]
     - 모바일 텔레그램 화면에서 빠르게 훑어보기 좋게 핵심만 불릿포인트와 굵은 글씨로 작성할 것
     - 구성:
-      1. 📊 **시장 마감 지수 요약** (지수 및 하루 흐름)
-      2. 📰 **오늘의 핵심 이슈 3줄 요약** (헤드라인 뉴스를 바탕으로 당일 시장을 관통한 핵심 재료 요약)
-      3. 🚀 **상승률 Top 10 & 주도 테마** (종목 리스트 + 상승 배경 테마 코멘트)
-      4. 📉 **하락률 Top 10 & 약세 요인** (종목 리스트 + 하락 배경 요약)
-      5. 💡 **내일장 체크포인트** (1~2줄 핵심)
+      1. 📊 **시장 마감 지수 요약**
+      2. 📰 **오늘의 핵심 이슈 요약** (주요 뉴스 기반)
+      3. 🚀 **상승률 Top 10 & 주요 테마**
+      4. 📉 **하락률 Top 10 & 약세 요인**
+      5. 💡 **내일장 체크포인트**
     """
     
-    # 503 트래픽 과부하 시 점진적으로 대기 시간을 늘려가며 최대 4회 재시도
-    delays = [5, 10, 15, 20]
-    for attempt, delay in enumerate(delays):
-        try:
-            response = client.models.generate_content(
-                model="gemini-3.6-flash",
-                contents=prompt
-            )
-            return response.text
-        except Exception as e:
-            error_str = str(e)
-            # 서버 과부하(503) 또는 일시적 속도제한(429) 발생 시 대기 후 재시도
-            if ("503" in error_str or "429" in error_str) and attempt < len(delays) - 1:
-                time.sleep(delay)
-                continue
-            raise e
+    # AI 호출 시도 (최대 2회)
+    try:
+        client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+        for attempt in range(2):
+            try:
+                response = client.models.generate_content(
+                    model="gemini-3.6-flash",
+                    contents=prompt
+                )
+                if response.text:
+                    return response.text
+            except Exception as e:
+                if attempt == 0 and "503" in str(e):
+                    time.sleep(3)
+                    continue
+                raise e
+    except Exception as e:
+        print(f"AI 서버 혼잡으로 기본 데이터 브리핑 모드로 전환합니다: {e}")
+    
+    # AI 서버 과부하 시 전송할 깔끔한 데이터 요약본 (에러 방지용)
+    fallback_text = f"""📊 *[국내 증시 마감 요약]*
+{market_info}
+
+📰 *오늘의 주요 뉴스 헤드라인*
+{news_headlines}
+
+🚀 *당일 상승률 Top 10*
+{top_risers}
+
+📉 *당일 하락률 Top 10*
+{top_fallers}
+
+*(AI 서버 혼잡으로 원본 데이터 브리핑이 발송되었습니다)*"""
+    return fallback_text
 
 def send_telegram(text):
-    """5. 텔레그램 메시지 발송"""
+    """5. 텔레그램 발송"""
     bot_token = os.environ["TELEGRAM_TOKEN"]
     chat_id = os.environ["TELEGRAM_CHAT_ID"]
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     
-    # 텔레그램 글자 수 제한(4,096자) 대응
     if len(text) > 4000:
         parts = [text[i:i+4000] for i in range(0, len(text), 4000)]
         for part in parts:
@@ -152,7 +164,7 @@ def send_telegram(text):
 
 if __name__ == "__main__":
     market_info = get_market_indices()
-    news_headlines = get_market_news(limit=6)
+    news_headlines = get_market_news(limit=5)
     top_risers = get_top_movers(mode="rise", limit=10)
     top_fallers = get_top_movers(mode="fall", limit=10)
     
