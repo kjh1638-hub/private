@@ -88,8 +88,10 @@ def get_top_movers(mode="rise", limit=10):
 
 import time
 
+import time
+
 def generate_briefing(market_info, news_headlines, top_risers, top_fallers):
-    """4. Google GenAI SDK 브리핑 생성 (모델 우회 및 503 재시도)"""
+    """4. 최신 Google GenAI SDK를 사용하여 브리핑 생성 (점진적 대기 재시도 적용)"""
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
     
     prompt = f"""
@@ -115,23 +117,22 @@ def generate_briefing(market_info, news_headlines, top_risers, top_fallers):
       5. 💡 **내일장 체크포인트** (1~2줄 핵심)
     """
     
-    # 503 에러 발생 시 차례대로 시도할 모델 우선순위 목록
-    models_to_try = ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-3.6-flash"]
-    
-    for model_name in models_to_try:
+    # 503 트래픽 과부하 시 점진적으로 대기 시간을 늘려가며 최대 4회 재시도
+    delays = [5, 10, 15, 20]
+    for attempt, delay in enumerate(delays):
         try:
             response = client.models.generate_content(
-                model=model_name,
+                model="gemini-3.6-flash",
                 contents=prompt
             )
             return response.text
         except Exception as e:
-            if "503" in str(e) or "404" in str(e):
-                time.sleep(3)  # 3초 대기 후 다음 모델로 시도
+            error_str = str(e)
+            # 서버 과부하(503) 또는 일시적 속도제한(429) 발생 시 대기 후 재시도
+            if ("503" in error_str or "429" in error_str) and attempt < len(delays) - 1:
+                time.sleep(delay)
                 continue
             raise e
-            
-    raise RuntimeError("모든 AI 모델 서버가 혼잡하여 호출에 실패했습니다.")
 
 def send_telegram(text):
     """5. 텔레그램 메시지 발송"""
