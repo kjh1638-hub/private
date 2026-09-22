@@ -1,0 +1,35 @@
+name: Daily Stock Briefing
+
+on:
+  schedule:
+    # 한국시간 기준 평일(월~금) 오후 3시 50분에 실행
+    # (UTC 기준: 06시 50분, 한국 시간 = UTC + 9시간)
+    - cron: '50 6 * * 1-5'
+  workflow_dispatch: # 웹에서 '테스트용 지금 즉시 실행' 버튼을 만들어주는 옵션
+
+jobs:
+  run-briefing:
+    runs-on: ubuntu-latest
+    steps:
+      # 1. 저장소의 코드(main.py) 가져오기
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # 2. 파이썬 실행 환경 준비
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      # 3. 필요한 파이썬 라이브러리 자동 설치
+      - name: Install dependencies
+        run: |
+          pip install requests beautifulsoup4 google-generativeai
+
+      # 4. 저장해 둔 비밀키(토큰/API Key)를 불러와 main.py 실행
+      - name: Run script
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python main.py
