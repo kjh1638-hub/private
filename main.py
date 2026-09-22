@@ -8,6 +8,7 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
 def get_market_indices():
     """1. 네이버 공식 API에서 코스피/코스닥 지수 수집"""
+    print("[1/5] 지수 데이터 수집 중...")
     try:
         url = "https://polling.finance.naver.com/api/realtime/domestic/index/KOSPI,KOSDAQ"
         res = requests.get(url, headers=HEADERS, timeout=10)
@@ -21,14 +22,16 @@ def get_market_indices():
             change = item.get("compareToPreviousClosePrice", "")
             rate = item.get("fluctuationsRatio", "")
             direction = "+" if item.get("compareToPreviousPrice", {}).get("name") == "RISING" else "-"
-            indices.append(f"*{name}*: {price}pt ({direction}{rate}%, {direction}{change}pt)")
+            indices.append(f"{name}: {price}pt ({direction}{rate}%, {direction}{change}pt)")
             
         return " / ".join(indices) if indices else "지수 정보 없음"
-    except Exception:
+    except Exception as e:
+        print(f"지수 수집 실패: {e}")
         return "지수 수집 일시 오류"
 
 def get_market_news(limit=5):
     """2. 실시간 주요 뉴스 헤드라인 수집"""
+    print("[2/5] 뉴스 헤드라인 수집 중...")
     try:
         url = "https://finance.naver.com/news/mainnews.naver"
         res = requests.get(url, headers=HEADERS, timeout=10)
@@ -44,11 +47,14 @@ def get_market_news(limit=5):
                 
         formatted_news = [f"• {title}" for title in news_titles]
         return "\n".join(formatted_news) if formatted_news else "주요 뉴스 없음"
-    except Exception:
+    except Exception as e:
+        print(f"뉴스 수집 실패: {e}")
         return "뉴스 수집 일시 오류"
 
 def get_top_movers(mode="rise", limit=10):
     """3. 상승률 / 하락률 상위 10위 수집"""
+    market_type = "상승률" if mode == "rise" else "하락률"
+    print(f"[3/5] {market_type} 상위 종목 수집 중...")
     results = []
     for sosok in [0, 1]:  # 0: 코스피, 1: 코스닥
         market_name = "코스피" if sosok == 0 else "코스닥"
@@ -88,7 +94,8 @@ def get_top_movers(mode="rise", limit=10):
     return "\n".join(formatted) if formatted else "종목 데이터 없음"
 
 def generate_briefing(market_info, news_headlines, top_risers, top_fallers):
-    """4. AI 브리핑 생성 (실패 시 원본 데이터 기반 기본 브리핑 자동 대체)"""
+    """4. AI 요약 브리핑 생성 (과부하 시 원본 텍스트 자동 대체)"""
+    print("[4/5] AI 브리핑 생성 요청 중...")
     prompt = f"""
     당신은 전문 증권사 PB이자 시황 애널리스트입니다.
     아래 수집된 지수, 주요 헤드라인 뉴스, 상/하락 10위 종목 데이터를 종합 분석하여 텔레그램용 마감 브리핑을 작성해주세요.
@@ -105,14 +112,13 @@ def generate_briefing(market_info, news_headlines, top_risers, top_fallers):
     [출력 요구사항]
     - 모바일 텔레그램 화면에서 빠르게 훑어보기 좋게 핵심만 불릿포인트와 굵은 글씨로 작성할 것
     - 구성:
-      1. 📊 **시장 마감 지수 요약**
-      2. 📰 **오늘의 핵심 이슈 요약** (주요 뉴스 기반)
-      3. 🚀 **상승률 Top 10 & 주요 테마**
-      4. 📉 **하락률 Top 10 & 약세 요인**
-      5. 💡 **내일장 체크포인트**
+      1. 📊 시장 마감 지수 요약
+      2. 📰 오늘의 핵심 이슈 요약 (주요 뉴스 기반)
+      3. 🚀 상승률 Top 10 & 주요 테마
+      4. 📉 하락률 Top 10 & 약세 요인
+      5. 💡 내일장 체크포인트
     """
     
-    # AI 호출 시도 (최대 2회)
     try:
         client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
         for attempt in range(2):
@@ -122,6 +128,7 @@ def generate_briefing(market_info, news_headlines, top_risers, top_fallers):
                     contents=prompt
                 )
                 if response.text:
+                    print("-> AI 브리핑 생성 성공!")
                     return response.text
             except Exception as e:
                 if attempt == 0 and "503" in str(e):
@@ -129,51 +136,51 @@ def generate_briefing(market_info, news_headlines, top_risers, top_fallers):
                     continue
                 raise e
     except Exception as e:
-        print(f"AI 서버 혼잡으로 기본 데이터 브리핑 모드로 전환합니다: {e}")
+        print(f"-> AI 서버 과부하로 기본 텍스트 모드로 전환: {e}")
     
-    # AI 서버 과부하 시 전송할 깔끔한 데이터 요약본 (에러 방지용)
-    fallback_text = f"""📊 *[국내 증시 마감 요약]*
+    # AI 응답 지연 시 안전망 발송
+    return f"""📊 [국내 증시 마감 요약]
 {market_info}
 
-📰 *오늘의 주요 뉴스 헤드라인*
+📰 오늘의 주요 뉴스 헤드라인
 {news_headlines}
 
-🚀 *당일 상승률 Top 10*
+🚀 당일 상승률 Top 10
 {top_risers}
 
-📉 *당일 하락률 Top 10*
+📉 당일 하락률 Top 10
 {top_fallers}
 
-*(AI 서버 혼잡으로 원본 데이터 브리핑이 발송되었습니다)*"""
-    return fallback_text
+(AI 서버 혼잡으로 기본 수집 데이터가 발송되었습니다.)"""
 
 def send_telegram(text):
-    """5. 텔레그램 발송 (응답 상태 검증 및 실패 시 일반 텍스트 재전송)"""
+    """5. 텔레그램 전송 (상세 로그 출력 포함)"""
+    print("[5/5] 텔레그램 발송 시도...")
     bot_token = os.environ.get("TELEGRAM_TOKEN", "").strip()
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
 
-    def _send_part(content):
-        # 1차 시도: Markdown 모드로 전송
-        payload = {"chat_id": chat_id, "text": content, "parse_mode": "Markdown"}
-        res = requests.post(url, json=payload)
-        
-        # 특수문자 마크다운 파싱 에러(400 Bad Request) 발생 시 일반 텍스트로 즉시 재전송
-        if res.status_code != 200:
-            print(f"Markdown 파싱 실패로 일반 텍스트 모드로 재전송합니다. (이유: {res.text})")
-            payload_plain = {"chat_id": chat_id, "text": content}
-            res = requests.post(url, json=payload_plain)
+    payload = {
+        "chat_id": chat_id,
+        "text": text
+    }
+    
+    res = requests.post(url, json=payload)
+    print(f"-> 텔레그램 응답 코드: {res.status_code}")
+    print(f"-> 텔레그램 응답 본문: {res.text}")
+    
+    if res.status_code != 200:
+        raise RuntimeError(f"텔레그램 발송 실패: {res.text}")
+    print("-> 텔레그램 발송 성공!")
 
-        print(f"텔레그램 응답: {res.status_code}, {res.text}")
-        
-        # 그래도 실패하면 에러를 발생시켜 GitHub 로그에 정확한 이유 출력
-        if res.status_code != 200:
-            raise RuntimeError(f"텔레그램 발송 최종 실패: {res.text}")
-
-    # 4000자 초과 분할 처리
-    if len(text) > 4000:
-        parts = [text[i:i+4000] for i in range(0, len(text), 4000)]
-        for part in parts:
-            _send_part(part)
-    else:
-        _send_part(text)
+# ★ 프로그램 시작 지점 (들여쓰기 절대 주의)
+if __name__ == "__main__":
+    print("=== 증시 브리핑 파이프라인 시작 ===")
+    market_info = get_market_indices()
+    news_headlines = get_market_news(limit=5)
+    top_risers = get_top_movers(mode="rise", limit=10)
+    top_fallers = get_top_movers(mode="fall", limit=10)
+    
+    briefing = generate_briefing(market_info, news_headlines, top_risers, top_fallers)
+    send_telegram(briefing)
+    print("=== 모든 작업 완료 ===")
