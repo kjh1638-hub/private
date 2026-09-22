@@ -86,8 +86,10 @@ def get_top_movers(mode="rise", limit=10):
     formatted = [f"{i+1}. [{item['market']}] {item['name']} ({item['rate_str']})" for i, item in enumerate(top_list)]
     return "\n".join(formatted) if formatted else "종목 데이터 없음"
 
+import time
+
 def generate_briefing(market_info, news_headlines, top_risers, top_fallers):
-    """4. 최신 Google GenAI SDK를 사용하여 브리핑 생성"""
+    """4. Google GenAI SDK 브리핑 생성 (모델 우회 및 503 재시도)"""
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
     
     prompt = f"""
@@ -112,11 +114,24 @@ def generate_briefing(market_info, news_headlines, top_risers, top_fallers):
       4. 📉 **하락률 Top 10 & 약세 요인** (종목 리스트 + 하락 배경 요약)
       5. 💡 **내일장 체크포인트** (1~2줄 핵심)
     """
-    response = client.models.generate_content(
-        model="gemini-3.6-flash",
-        contents=prompt
-    )
-    return response.text
+    
+    # 503 에러 발생 시 차례대로 시도할 모델 우선순위 목록
+    models_to_try = ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-3.6-flash"]
+    
+    for model_name in models_to_try:
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt
+            )
+            return response.text
+        except Exception as e:
+            if "503" in str(e) or "404" in str(e):
+                time.sleep(3)  # 3초 대기 후 다음 모델로 시도
+                continue
+            raise e
+            
+    raise RuntimeError("모든 AI 모델 서버가 혼잡하여 호출에 실패했습니다.")
 
 def send_telegram(text):
     """5. 텔레그램 메시지 발송"""
