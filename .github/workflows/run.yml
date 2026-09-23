@@ -20,7 +20,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install requests pykrx pandas groq
+          pip install requests groq
 
       - name: Run script
         env:
