@@ -83,7 +83,6 @@ def get_top_movers_naver(limit=10):
                 except ValueError:
                     continue
         except Exception as e:
-            print(f"[{market}] 종목 파싱 에러: {e}")
             continue
 
     if not all_stocks:
@@ -98,13 +97,32 @@ def get_top_movers_naver(limit=10):
     return "\n".join(top_risers), "\n".join(top_fallers)
 
 def generate_briefing(market_info, supply_info, news_headlines, top_risers, top_fallers):
-    """5. Groq AI 프리미엄 브리핑"""
+    """5. 계정에서 사용 가능한 모델을 자동 감지하여 Groq 브리핑 생성"""
     api_key = os.environ.get("GROQ_API_KEY", "").strip()
     if not api_key:
-        print("★ [에러] GitHub Secrets에 GROQ_API_KEY 환경변수가 아예 설정되지 않았습니다!")
+        print("★ [에러] GROQ_API_KEY 환경변수가 설정되지 않았습니다.")
         return make_fallback_report(market_info, supply_info, news_headlines, top_risers, top_fallers)
 
-    print(f"Groq API Key 확인 완료 (키 앞자리: {api_key[:6]}...)")
+    client = Groq(api_key=api_key)
+
+    # 1) 현재 계정에서 실제로 쓸 수 있는 활성 모델 목록 자동 조회
+    available_models = []
+    try:
+        models_data = client.models.list()
+        available_models = [m.id for m in models_data.data if "whisper" not in m.id]
+        print(f"사용 가능한 모델 목록: {available_models}")
+    except Exception as e:
+        print(f"모델 목록 조회 오류: {e}")
+
+    # 기본 후보군 (llama, gemma, mixtral 계열)
+    candidate_models = available_models + [
+        "llama-3.2-3b-preview",
+        "llama-3.2-1b-preview",
+        "gemma2-9b-it",
+        "mixtral-8x7b-32768",
+        "llama3-8b-8192",
+        "llama3-70b-8192"
+    ]
 
     prompt = f"""
 당신은 전문 증권사 PB이자 시황 수석 애널리스트입니다.
@@ -142,12 +160,15 @@ def generate_briefing(market_info, supply_info, news_headlines, top_risers, top_
   💡 **내일장 대응 포인트**
   - 투자자가 챙겨야 할 핵심 체크포인트 2가지
 """
-    client = Groq(api_key=api_key)
-    models = ["llama-3.1-8b-instant", "llama-3.3-70b-versatile"]
 
-    for m in models:
+    # 2) 계정에 열려 있는 모델을 순서대로 호출
+    seen = set()
+    for m in candidate_models:
+        if m in seen:
+            continue
+        seen.add(m)
         try:
-            print(f"Groq 모델 호출 시도: {m}")
+            print(f"호출 시도 모델: {m}")
             response = client.chat.completions.create(
                 model=m,
                 messages=[
@@ -157,10 +178,10 @@ def generate_briefing(market_info, supply_info, news_headlines, top_risers, top_
                 temperature=0.3,
                 max_tokens=2500
             )
-            print("Groq AI 작성 성공!")
+            print(f"★ 모델 [{m}] 브리핑 생성 성공!")
             return response.choices[0].message.content
         except Exception as e:
-            print(f"★ [{m}] 호출 실패 상세 로그: {e}")
+            print(f"[{m}] 호출 실패: {e}")
             continue
 
     return make_fallback_report(market_info, supply_info, news_headlines, top_risers, top_fallers)
