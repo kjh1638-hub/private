@@ -6,8 +6,9 @@ import yfinance as yf
 from groq import Groq
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15",
-    "Accept": "application/json, text/plain, */*"
+    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1",
+    "Accept": "application/json, text/plain, */*",
+    "Referer": "https://m.stock.naver.com/"
 }
 
 def get_yfinance_ticker_data(ticker_symbol):
@@ -39,47 +40,94 @@ def get_yfinance_ticker_data(ticker_symbol):
     return "집계 대기", 0.0, 0.0
 
 def get_kospi200_night_futures():
-    """Eurex 야간선물 및 코스피200 선물 안정 수집"""
-    
-    # 1. 네이버 모바일 대표 파생 API
+    """코스피200 선물 최근월물 실제 체결가 및 전일 정산가 대비 정밀 계산"""
     try:
-        url = "https://m.stock.naver.com/front-api/v1/marketIndex/prices?category=futures&reutersCode=10100"
-        res = requests.get(url, headers={"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0)"}, timeout=6)
+        url = "https://m.stock.naver.com/api/future/KOSPI200/integration"
+        res = requests.get(url, headers=HEADERS, timeout=8)
         if res.status_code == 200:
-            data = res.json().get("result", [])
-            if data:
-                p = data[0].get("closePrice")
-                r = data[0].get("fluctuationsRatio")
-                if p and r:
-                    sign = "+" if not str(r).startswith("-") and not str(r).startswith("+") else ""
-                    return f"{p}pt ({sign}{r}%) [코스피200 선물 최근월물]"
+            data = res.json()
+            items = data.get("itemList", []) or data.get("stockItemList", [])
+            if items:
+                def get_vol(x):
+                    try:
+                        return float(str(x.get("totalVolume", 0)).replace(",", ""))
+                    except Exception:
+                        return 0.0
+                
+                top = max(items, key=get_vol)
+                close_p = float(str(top.get("closePrice") or top.get("nowPrice", 0)).replace(",", ""))
+                base_p = float(str(top.get("basePrice") or top.get("previousClosePrice", 0)).replace(",", ""))
+                name = top.get("stockName", "코스피200 선물 최근월물")
+
+                if 250.0 <= close_p <= 550.0 and base_p > 0:
+                    diff = close_p - base_p
+                    rate = (diff / base_p) * 100
+                    sign = "+" if rate >= 0 else ""
+                    return f"{close_p:,.2f}pt ({sign}{rate:.2f}%) [{name}]"
     except Exception as e:
         print(f"[선물 수집 1차] {e}")
 
-    # 2. 다음(Daum) 금융 선물 최근월물 API
     try:
-        daum_url = "https://finance.daum.net/api/quote/KRX:10100/summary"
-        d_headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", "Referer": "https://finance.daum.net/"}
-        res = requests.get(daum_url, headers=d_headers, timeout=6)
+        d_url = "https://finance.daum.net/api/quote/KRX:10100/summary"
+        d_headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer": "https://finance.daum.net/"
+        }
+        res = requests.get(d_url, headers=d_headers, timeout=8)
         if res.status_code == 200:
             d = res.json().get("data", {})
             trade_p = float(d.get("tradePrice", 0))
             change_rate = float(d.get("changeRate", 0)) * 100
             sign = "+" if change_rate >= 0 else ""
-            if 200.0 <= trade_p <= 600.0:
+            if 250.0 <= trade_p <= 550.0:
                 return f"{trade_p:,.2f}pt ({sign}{change_rate:.2f}%) [선물 최근월물]"
     except Exception as e:
         print(f"[선물 수집 2차] {e}")
 
-    # 3. 야후 파이낸스 KOSPI 200 연계 지표 프록시
-    try:
-        val_str, r, p = get_yfinance_ticker_data("^KS200")
-        if val_str != "집계 대기":
-            return f"{val_str} [코스피200 지수 연동 기준]"
-    except Exception as e:
-        print(f"[선물 수집 3차] {e}")
-
     return "장 마감 정산 확인"
+
+def get_today_economic_schedule():
+    """오늘 날짜 기준 공식 경제/증시 캘린더 실제 일정 수집 (추정/과거 데이터 원천 차단)"""
+    today_dt = datetime.date.today()
+    today_ymd = today_dt.strftime("%Y%m%d")
+    schedules = []
+
+    # 1. 네이버 증권 주요 경제지표 캘린더 API
+    try:
+        url = f"https://m.stock.naver.com/api/economic/calendar?date={today_ymd}"
+        res = requests.get(url, headers=HEADERS, timeout=8)
+        if res.status_code == 200:
+            data = res.json()
+            items = data.get("calendarList", []) or data.get("list", [])
+            for it in items[:6]:
+                nation = it.get("nation", "")
+                event = it.get("event", "") or it.get("title", "")
+                time_str = it.get("time", "")
+                if event:
+                    prefix = f"[{nation}] " if nation else ""
+                    time_prefix = f"({time_str}) " if time_str else ""
+                    schedules.append(f"• {prefix}{time_prefix}{event}")
+    except Exception as e:
+        print(f"[캘린더 수집 1차] {e}")
+
+    # 2. 국내 주요 공시/증시 일정 백업
+    try:
+        url_sub = f"https://m.stock.naver.com/api/calendar/event?date={today_ymd}"
+        res = requests.get(url_sub, headers=HEADERS, timeout=8)
+        if res.status_code == 200:
+            data = res.json()
+            events = data.get("events", [])
+            for ev in events[:4]:
+                tit = ev.get("title", "")
+                if tit:
+                    schedules.append(f"• [국내 증시] {tit}")
+    except Exception as e:
+        print(f"[캘린더 수집 2차] {e}")
+
+    if schedules:
+        return "\n".join(schedules)
+    else:
+        return "• 오늘 예정된 주요국 대형 경제지표 및 특이 증시 일정 없음 (장중 외환/외국인 선물 수급 중심 장세)"
 
 def get_global_indices_and_macro():
     """1. 글로벌 주요 지수, 환율, 유가, 야간선물 수집"""
@@ -153,7 +201,7 @@ def get_morning_news(limit=10):
         return [f"뉴스 수집 오류: {e}"]
 
 def call_groq_ai(client, system_prompt, user_prompt):
-    """Groq AI 모델 호출 함수"""
+    """Groq AI 모델 분할 호출"""
     priority_models = ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]
     for m in priority_models:
         try:
@@ -164,7 +212,7 @@ def call_groq_ai(client, system_prompt, user_prompt):
                     {"role": "user", "content": user_prompt}
                 ],
                 temperature=0.2,
-                max_tokens=3000
+                max_tokens=3200
             )
             return res.choices[0].message.content
         except Exception as e:
@@ -172,8 +220,8 @@ def call_groq_ai(client, system_prompt, user_prompt):
             continue
     return ""
 
-def generate_morning_briefing(market_macro, nasdaq_movers, dow_movers, sp_movers, news_list):
-    """4. 토큰 잘림 방지를 위해 2단계 분할 호출로 1부~5부 완전 작성"""
+def generate_morning_briefing(market_macro, nasdaq_movers, dow_movers, sp_movers, news_list, today_schedules):
+    """4. 2단계 분할 호출을 통한 5부 완결형 리포트 작성"""
     api_key = os.environ.get("GROQ_API_KEY", "").strip()
     if not api_key:
         return "GROQ API KEY 누락"
@@ -182,11 +230,11 @@ def generate_morning_briefing(market_macro, nasdaq_movers, dow_movers, sp_movers
     today_str = datetime.date.today().strftime("%Y년 %m월 %d일")
     news_text = "\n".join([f"{idx+1}. {n}" for idx, n in enumerate(news_list)])
 
-    system_prompt = f"당신은 국내 최고 증권사 글로벌 수석 PB 애널리스트입니다. 오늘은 {today_str}입니다. 허위 사실을 날조하지 말고, 깊이 있고 격식 있는 한국어로 서술하십시오."
+    system_prompt = f"당신은 국내 대형 증권사 수석 PB이자 글로벌 시황 애널리스트입니다. 오늘은 {today_str}입니다. 데이터를 왜곡하거나 허위 사실을 지어내지 말고, 품격 있는 전문 금융 한국어로 작성하십시오."
 
-    # 1차 호출: 1부, 2부, 3부 (미국 및 글로벌 집중 분석)
+    # 1차 호출: 1부, 2부, 3부 (글로벌 증시 및 미국 특징주 분석)
     prompt_part1 = f"""
-아래 데이터를 바탕으로 '미국 3대 지수 모닝 브리핑 1부~3부'를 작성하십시오.
+아래 수집 데이터를 기반으로 '글로벌 모닝 브리핑 1부~3부'를 깊이 있게 작성하십시오.
 반드시 [SPLIT_POINT] 구분자를 포함하여 1부, 2부, 3부를 분할하십시오.
 
 [수집 데이터]
@@ -199,19 +247,19 @@ def generate_morning_briefing(market_macro, nasdaq_movers, dow_movers, sp_movers
 4. S&P 500 특징주:
 {sp_movers}
 
-[작성 규칙]
-- 종목명, 티커, 가격, 등락률은 반드시 굵은 글씨(**)로 쓰고, 원인 설명은 일반 글씨(연한 글씨)로 작성하십시오.
-  (예: • **엔비디아(NVDA, $135.20, +4.15%)**: 차세대 AI 가속기 수요 견조로 상승...)
+[작성 및 서식 규칙]
+- **종목 서식 필수**: 종목명, 티커, 가격, 등락률은 반드시 **굵은 글씨(**)**로 쓰고, 뒤따르는 원인 설명은 일반 글씨(연한 글씨)로 작성하십시오.
+  * 예시: • **엔비디아 (NVDA, $135.20, +4.15%)**: 차세대 AI 가속기 수요 견조로 상승세 지속...
 
 [출력 양식]
 [1부: 매크로 총평 및 주요 지표]
 ☀️ **간밤의 글로벌 증시 마감 총평**
 - 나스닥, 다우존스, S&P 500, 필라델피아 반도체 지수의 실제 등락 수치와 퍼센트를 구체적으로 비교 분석
-- 기술주(나스닥)와 전통 가치주(다우) 간의 순환매 흐름 상세 해설
+- 기술주(나스닥)와 가치주(다우) 간의 순환매 및 투자 심리 상세 해설
 
 🌐 **주요 매크로 지표 심층 분석**
-- 원/달러 환율 실제 수치 및 외국인 수급 영향도
-- WTI 국제유가 등락 배경 및 원자재/물가 경로
+- 원/달러 환율 실제 수치 및 외국인 수급 영향도 분석
+- WTI 국제유가 등락 배경 및 원자재/물가 경로 분석
 - 필라델피아 반도체 지수 등락에 따른 국내 반도체(삼성전자, SK하이닉스) 파급 효과
 
 [SPLIT_POINT]
@@ -228,15 +276,15 @@ def generate_morning_briefing(market_macro, nasdaq_movers, dow_movers, sp_movers
 
 [3부: 다우존스 & S&P 500 전통 우량주 및 경기민감 섹터 분석]
 🏛️ **다우존스(DOW) 산업·금융·가치주 동향**
-- 수집된 다우 종목들의 가격/등락률을 볼드체로 명시하고 종목별 등락 원인 분석
+- 수집된 다우 종목들의 가격/등락률을 볼드체로 명시하고 금융, 산업재, 방산 종목별 등락 요인 분석
 
 🏥 **S&P 500 헬스케어·에너지·방어주 특징**
-- 수집된 S&P 500 종목들의 가격/등락률을 볼드체로 명시하고 바이오, 에너지, 방어주 흐름 분석
+- 수집된 S&P 500 종목들의 가격/등락률을 볼드체로 명시하고 바이오, 에너지, 소비재 흐름 분석
 """
 
-    # 2차 호출: 4부, 5부 (국내 개장 전망, 뉴스 10선, 일정, PB 실전 전략)
+    # 2차 호출: 4부, 5부 (개장 전망, 주도 테마 3선, 뉴스 10선, 캘린더 실제 일정, PB 전략)
     prompt_part2 = f"""
-아래 데이터를 바탕으로 '국내 증시 개장 전망 및 실전 전략 4부~5부'를 작성하십시오.
+아래 수집 데이터를 기반으로 '국내 증시 개장 전망 및 실전 전략 4부~5부'를 작성하십시오.
 반드시 [SPLIT_POINT] 구분자를 포함하여 4부와 5부를 분할하십시오.
 
 [수집 데이터]
@@ -244,9 +292,13 @@ def generate_morning_briefing(market_macro, nasdaq_movers, dow_movers, sp_movers
 {market_macro}
 - 장전 핵심 뉴스 헤드라인 10선:
 {news_text}
+- 오늘 [{today_str}] 공식 증시 캘린더 일정:
+{today_schedules}
 
-[작성 규칙]
-- **일정 허위 날조 절대 금지**: 과거 기억에 의존해 오늘 날짜와 맞지 않는 특정 개별 기업의 실적 발표(예: 삼성전자 실적 등)를 절대로 지어내지 마십시오. 오늘 일정은 미 연준(Fed) 금리 정책, 주요국 경제지표(고용/물가/환율), 그리고 [뉴스 헤드라인 10선]에 실제 명시된 공시/정책 일정만을 작성하십시오.
+[작성 및 환각 방지 규칙]
+- **야간선물 분석**: 수집 데이터의 코스피 야간선물 수치(지수 포인트 및 등락률)를 직접 인용하여 오늘 아침 코스피/코스닥의 시초가 갭 방향(상승/하락/보합)을 명확하게 짚어주십시오.
+- **국내 주도 테마 3선**: 미 증시 강세 섹터(반도체/AI, 플랫폼, 바이오 등)와 연동되어 오늘 국내 증시에서 가장 강하게 부각될 유력 테마 3가지를 구체적인 국내 관련 종목군과 함께 명확히 제시하십시오.
+- **일정 작성 엄격 통제**: 절대로 과거 기억에 의존해 기업 실적 발표나 허위 일정을 날조하지 마십시오. 오직 위에 제공된 [공식 증시 캘린더 일정]에 적힌 실제 팩트와 공식 매크로(환율/외국인 선물 수급)만을 바탕으로 오늘 일정을 정리하십시오.
 
 [출력 양식]
 [4부: 국내 증시 개장 전망 및 주도 테마 3선]
@@ -261,11 +313,10 @@ def generate_morning_briefing(market_macro, nasdaq_movers, dow_movers, sp_movers
 
 [5부: 장전 체크 뉴스 10선, 대내외 일정 및 PB 실전 전략]
 🗞️ **장 시작 전 필독! 국내 증시 핵심 체크 뉴스 10선**
-- 수집된 뉴스 10개를 기반으로 오늘 장전 투자자가 반드시 알아야 할 국내외 핵심 뉴스 10가지를 1번부터 10번까지 빠짐없이 요약
+- 수집된 뉴스 10개를 기반으로 오늘 장전 투자자가 반드시 알아야 할 핵심 뉴스 10가지를 1번부터 10번까지 빠짐없이 요약
 
-🌐 **오늘 반드시 체크해야 할 대내외 주요 일정 및 거시 변수**
-- **해외 일정**: 미 연준 통화정책 및 연사 발언, 주요국 경제지표 발표 등 공인된 일정
-- **국내 일정**: 외환시장 동향, 금융당국 정책 발표, 수집된 뉴스 10선에 공시된 실제 일정
+🌐 **오늘 [{today_str}] 반드시 체크해야 할 대내외 공식 일정**
+- 수집된 [공식 증시 캘린더 일정] 내용을 바탕으로 오늘 발표될 주요국 경제지표 및 국내 증시 이벤트를 불릿포인트(•)로 정리
 
 💡 **오늘장 PB 실전 투자 전략**
 1. **장초반 시초가 갭 형성 시 실전 매매 대응 원칙**
@@ -281,7 +332,6 @@ def generate_morning_briefing(market_macro, nasdaq_movers, dow_movers, sp_movers
     print("★ [2/2] 4부~5부 생성 중...")
     res_part2 = call_groq_ai(client, system_prompt, prompt_part2)
 
-    # 1부~3부와 4부~5부를 합쳐서 반환
     full_briefing = f"{res_part1.strip()}\n\n[SPLIT_POINT]\n\n{res_part2.strip()}"
     return full_briefing
 
@@ -301,7 +351,6 @@ def send_telegram(text):
         msg = part.strip()
         if not msg:
             continue
-        # 마크다운 전송 후 실패 시 일반 텍스트 재전송
         res = requests.post(url, json={"chat_id": chat_id, "text": msg, "parse_mode": "Markdown"})
         if res.status_code != 200:
             requests.post(url, json={"chat_id": chat_id, "text": msg})
@@ -310,6 +359,8 @@ if __name__ == "__main__":
     market_macro = get_global_indices_and_macro()
     nasdaq_movers, dow_movers, sp_movers = get_us_broad_movers()
     news_list = get_morning_news(limit=10)
+    today_schedules = get_today_economic_schedule()
+    print(f"★ [수집 확인] 오늘 증시 캘린더 일정:\n{today_schedules}")
     
-    briefing = generate_morning_briefing(market_macro, nasdaq_movers, dow_movers, sp_movers, news_list)
+    briefing = generate_morning_briefing(market_macro, nasdaq_movers, dow_movers, sp_movers, news_list, today_schedules)
     send_telegram(briefing)
