@@ -40,26 +40,36 @@ def get_market_news(limit=6):
     except Exception as e:
         return f"뉴스 수집 오류: {e}"
 
-def get_top_movers(mode="UP", limit=10):
-    """3. 로그인 필요 없는 네이버 모바일 API로 상승/하락률 상위 종목 수집 (UP / DOWN)"""
+def get_top_movers(mode="rise", limit=10):
+    """3. 네이버 실제 랭킹 API로 상승/하락률 상위 종목 수집 (mode: rise / fall)"""
     try:
-        url = f"https://m.stock.naver.com/api/stocks/ranking/fluctuation?rankingType={mode}&pageSize={limit}&page=1"
+        # 네이버 모바일 실제 랭킹 엔드포인트
+        url = f"https://m.stock.naver.com/api/stocks/ranking/{mode}?page=1&pageSize={limit}"
         res = requests.get(url, headers=HEADERS, timeout=10)
         data = res.json()
-        stocks = data.get("stocks", [])
+        
+        # 응답 형태에 따른 안전 파싱
+        stocks = data.get("stocks", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
         
         items = []
         for idx, item in enumerate(stocks[:limit], 1):
             name = item.get("stockName", "")
             rate = item.get("fluctuationsRatio", "")
-            sign = "+" if mode == "UP" else ""
-            items.append(f"{idx}. {name} ({sign}{rate}%)")
+            sign = "+" if mode == "rise" else ""
+            if name:
+                items.append(f"{idx}. {name} ({sign}{rate}%)")
+                
         return "\n".join(items) if items else "종목 데이터 없음"
     except Exception as e:
         return f"종목 수집 오류: {e}"
 
 def generate_briefing(market_info, news_headlines, top_risers, top_fallers):
     """4. Groq 초고속 AI 브리핑"""
+    api_key = os.environ.get("GROQ_API_KEY", "").strip()
+    if not api_key:
+        print("경고: GROQ_API_KEY 환경변수가 없습니다. 원본 리포트를 전송합니다.")
+        return make_fallback_report(market_info, news_headlines, top_risers, top_fallers)
+
     prompt = f"""
 당신은 전문 증권사 PB이자 시황 수석 애널리스트입니다.
 아래 수집된 당일 마감 지수, 주요 뉴스, 상/하락 상위 종목 데이터를 바탕으로 모바일 텔레그램용 마감 브리핑을 작성해주세요.
@@ -74,7 +84,7 @@ def generate_briefing(market_info, news_headlines, top_risers, top_fallers):
 {top_fallers}
 
 [작성 요구사항]
-- 모바일 텔레그램 가독성을 위해 불릿포인트와 굵은 글씨를 활용하세요.
+- 모바일 텔레그램 가독성을 위해 불릿포인트와 굵은 글씨를 적극 활용하세요.
 - 구성 형식:
   📊 **국내 증시 마감 요약**
   - 지수 흐름 및 오늘 시장 총평 요약
@@ -91,10 +101,8 @@ def generate_briefing(market_info, news_headlines, top_risers, top_fallers):
   💡 **내일장 대응 포인트**
   - 투자자가 주목해야 할 수급/매크로 체크포인트 2가지
 """
-    client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
-    
-    # 404 에러가 절대 없는 검증된 Groq 무료 모델들을 순서대로 시도
-    models = ["llama-3.1-70b-versatile", "llama-3.1-8b-instant", "llama3-70b-8192", "mixtral-8x7b-32768"]
+    client = Groq(api_key=api_key)
+    models = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
     
     for m in models:
         try:
@@ -108,10 +116,13 @@ def generate_briefing(market_info, news_headlines, top_risers, top_fallers):
                 max_tokens=2500
             )
             return response.choices[0].message.content
-        except Exception:
+        except Exception as e:
+            print(f"[{m}] 호출 실패: {e}")
             continue
 
-    # AI 호출 모두 실패 시 데이터가 꽉 찬 원본 리포트 발송
+    return make_fallback_report(market_info, news_headlines, top_risers, top_fallers)
+
+def make_fallback_report(market_info, news_headlines, top_risers, top_fallers):
     return f"""📊 **국내 증시 마감 리포트**
 {market_info}
 
@@ -141,8 +152,8 @@ def send_telegram(text):
 if __name__ == "__main__":
     market_info = get_market_indices()
     news_headlines = get_market_news()
-    top_risers = get_top_movers("UP", 10)
-    top_fallers = get_top_movers("DOWN", 10)
+    top_risers = get_top_movers("rise", 10)
+    top_fallers = get_top_movers("fall", 10)
     
     briefing = generate_briefing(market_info, news_headlines, top_risers, top_fallers)
     send_telegram(briefing)
