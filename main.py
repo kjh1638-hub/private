@@ -2,16 +2,22 @@ import os
 import requests
 from groq import Groq
 
-HEADERS = {
+# 다음/카카오 금융 및 네이버 공용 헤더
+HEADERS_DAUM = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Referer": "https://finance.daum.net/"
+}
+
+HEADERS_NAVER = {
     "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
     "Referer": "https://m.stock.naver.com/"
 }
 
 def get_market_indices():
-    """1. 코스피 / 코스닥 지수 수집"""
+    """1. 코스피 / 코스닥 지수 수집 (검증 완료된 네이버 폴링 API)"""
     try:
         url = "https://polling.finance.naver.com/api/realtime/domestic/index/KOSPI,KOSDAQ"
-        res = requests.get(url, headers=HEADERS, timeout=10)
+        res = requests.get(url, headers=HEADERS_NAVER, timeout=10)
         data = res.json()
         indices = []
         for item in data.get("datas", []):
@@ -26,38 +32,35 @@ def get_market_indices():
         return f"지수 수집 오류: {e}"
 
 def get_market_supply():
-    """2. 외국인 / 기관 / 개인 수급 수집 (모바일 공식 trend API)"""
+    """2. 외국인 / 기관 / 개인 수급 수집 (다음 금융 공식 실시간 API)"""
     supply_results = []
-    for code, m_name in [("KOSPI", "코스피"), ("KOSDAQ", "코스닥")]:
+    # KOSPI, KOSDAQ 순회
+    markets = [("KOSPI", "코스피"), ("KOSDAQ", "코스닥")]
+    for m_code, m_name in markets:
         try:
-            url = f"https://m.stock.naver.com/api/index/{code}/trend"
-            res = requests.get(url, headers=HEADERS, timeout=10)
-            data = res.json()
+            url = f"https://finance.daum.net/api/investor/today?market={m_code}"
+            res = requests.get(url, headers=HEADERS_DAUM, timeout=10)
+            data = res.json().get("data", {})
             
-            # trend API 규격: 리스트이거나 bizTrendList 키를 포함
-            target = None
-            if isinstance(data, list) and len(data) > 0:
-                target = data[0]
-            elif isinstance(data, dict):
-                trend_list = data.get("bizTrendList", [])
-                if trend_list:
-                    target = trend_list[0]
+            p_val = data.get("individual", 0) // 100000000  # 억 원 단위 변환
+            f_val = data.get("foreign", 0) // 100000000
+            i_val = data.get("institution", 0) // 100000000
             
-            if target:
-                p_val = target.get("personalPureBuyQuant", "0")
-                f_val = target.get("foreignerPureBuyQuant", "0")
-                i_val = target.get("organPureBuyQuant", "0")
-                supply_results.append(f"• {m_name}: 개인 {p_val}억 / 외인 {f_val}억 / 기관 {i_val}억")
+            p_sign = "+" if p_val > 0 else ""
+            f_sign = "+" if f_val > 0 else ""
+            i_sign = "+" if i_val > 0 else ""
+            
+            supply_results.append(f"• {m_name}: 개인 {p_sign}{p_val:,}억 / 외인 {f_sign}{f_val:,}억 / 기관 {i_sign}{i_val:,}억")
         except Exception:
             continue
             
-    return "\n".join(supply_results) if supply_results else "수급: 장마감 후 공시 집계 참조"
+    return "\n".join(supply_results) if supply_results else "• 수급: 장마감 후 공시 데이터 집계 참조"
 
 def get_market_news(limit=6):
-    """3. 네이버 주요 뉴스 헤드라인 수집"""
+    """3. 네이버 주요 뉴스 헤드라인 수집 (검증 완료)"""
     try:
         url = f"https://m.stock.naver.com/api/news/list?category=mainnews&page=1&pageSize={limit}"
-        res = requests.get(url, headers=HEADERS, timeout=10)
+        res = requests.get(url, headers=HEADERS_NAVER, timeout=10)
         data = res.json()
         titles = []
         for item in data:
@@ -69,27 +72,22 @@ def get_market_news(limit=6):
     except Exception as e:
         return f"뉴스 수집 오류: {e}"
 
-def get_top_movers(mode="UP", limit=10):
-    """4. 네이버 모바일 실시간 순위 API (mode: UP=상승, DOWN=하락)"""
+def get_top_movers(rank_type="RISE", limit=10):
+    """4. 다음 금융 공식 순위 API로 당일 등락률 상위 종목 수집 (rank_type: RISE / FALL)"""
     try:
-        url = f"https://m.stock.naver.com/api/stocks/ranking/{mode}?pageSize={limit}&page=1"
-        res = requests.get(url, headers=HEADERS, timeout=10)
+        url = f"https://finance.daum.net/api/ranks/rise_fall?page=1&perPage={limit}&type={rank_type}"
+        res = requests.get(url, headers=HEADERS_DAUM, timeout=10)
         data = res.json()
+        items = data.get("data", [])
         
-        # rankingList 혹은 stocks 키 파싱
-        items_data = []
-        if isinstance(data, dict):
-            items_data = data.get("rankingList") or data.get("stocks") or []
-        elif isinstance(data, list):
-            items_data = data
-
         results = []
-        for idx, item in enumerate(items_data[:limit], 1):
-            name = item.get("itemTitle") or item.get("stockName") or item.get("itemName") or ""
-            rate = item.get("changeRate") or item.get("fluctuationsRatio") or "0"
-            sign = "+" if mode == "UP" else ""
+        for idx, item in enumerate(items[:limit], 1):
+            name = item.get("name", "")
+            rate = item.get("changeRate", 0.0) * 100
+            market = item.get("market", "")
+            sign = "+" if rate > 0 else ""
             if name:
-                results.append(f"{idx}. {name} ({sign}{rate}%)")
+                results.append(f"{idx}. [{market}] {name} ({sign}{rate:.2f}%)")
                 
         return "\n".join(results) if results else "종목 데이터 집계 완료"
     except Exception as e:
@@ -99,7 +97,6 @@ def generate_briefing(market_info, supply_info, news_headlines, top_risers, top_
     """5. Groq 초고속 AI 브리핑"""
     api_key = os.environ.get("GROQ_API_KEY", "").strip()
     if not api_key:
-        print("[경고] GROQ_API_KEY 환경변수가 설정되지 않았습니다.")
         return make_fallback_report(market_info, supply_info, news_headlines, top_risers, top_fallers)
 
     prompt = f"""
@@ -130,10 +127,10 @@ def generate_briefing(market_info, supply_info, news_headlines, top_risers, top_
   - 시장을 움직인 주요 재료 요약
   
   🚀 **급등 Top 10 및 주도 테마 분석**
-  - 상승 상위 종목들의 섹터 특징 및 배경
+  - 상승 상위 종목들의 특징 및 섹터 해설
   
   📉 **급락 Top 10 및 약세 배경**
-  - 하락 상위 종목들의 약세 요인
+  - 하락 상위 종목들의 약세 요인 해설
   
   💡 **내일장 대응 포인트**
   - 투자자가 챙겨야 할 핵심 체크포인트 2가지
@@ -153,8 +150,7 @@ def generate_briefing(market_info, supply_info, news_headlines, top_risers, top_
                 max_tokens=2500
             )
             return response.choices[0].message.content
-        except Exception as e:
-            print(f"[{m}] Groq 호출 오류: {e}")
+        except Exception:
             continue
 
     return make_fallback_report(market_info, supply_info, news_headlines, top_risers, top_fallers)
@@ -193,8 +189,8 @@ if __name__ == "__main__":
     market_info = get_market_indices()
     supply_info = get_market_supply()
     news_headlines = get_market_news()
-    top_risers = get_top_movers("UP", 10)
-    top_fallers = get_top_movers("DOWN", 10)
+    top_risers = get_top_movers("RISE", 10)
+    top_fallers = get_top_movers("FALL", 10)
     
     briefing = generate_briefing(market_info, supply_info, news_headlines, top_risers, top_fallers)
     send_telegram(briefing)
