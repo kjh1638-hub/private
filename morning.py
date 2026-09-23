@@ -9,23 +9,38 @@ HEADERS = {
 }
 
 def get_yfinance_ticker_data(ticker_symbol):
-    """야후 파이낸스 실시간/종가 및 등락률 계산"""
+    """야후 파이낸스 fast_info 및 history 이중 조회로 누락 없는 시세 수집"""
     try:
         t = yf.Ticker(ticker_symbol)
-        hist = t.history(period="5d")
-        if len(hist) >= 2:
+        
+        # 1차 시도: fast_info (가장 빠름)
+        try:
+            fi = t.fast_info
+            price = fi.last_price
+            prev = fi.previous_close
+            if price is not None and prev is not None and prev > 0:
+                change = price - prev
+                rate = (change / prev) * 100
+                sign = "+" if rate >= 0 else ""
+                return f"{price:,.2f} ({sign}{rate:.2f}%)", rate, price
+        except Exception:
+            pass
+
+        # 2차 시도: history 1개월 조회
+        hist = t.history(period="1mo")
+        if not hist.empty and len(hist) >= 2:
             close = hist['Close'].iloc[-1]
             prev = hist['Close'].iloc[-2]
             change = close - prev
             rate = (change / prev) * 100
             sign = "+" if rate >= 0 else ""
-            return f"{close:,.2f} ({sign}{rate:.2f}%)", rate
+            return f"{close:,.2f} ({sign}{rate:.2f}%)", rate, close
     except Exception:
         pass
-    return "집계 대기", 0.0
+    return "집계 대기", 0.0, 0.0
 
 def get_global_indices_and_macro():
-    """1. 글로벌 주요 지수 및 매크로 지표 수집"""
+    """1. 글로벌 주요 지수, 환율, 유가, 야간선물 수집"""
     targets = [
         ("^IXIC", "나스닥 종합"),
         ("^DJI", "다우존스"),
@@ -36,10 +51,10 @@ def get_global_indices_and_macro():
     ]
     results = []
     for symbol, name in targets:
-        val_str, _ = get_yfinance_ticker_data(symbol)
+        val_str, _, _ = get_yfinance_ticker_data(symbol)
         results.append(f"• *{name}*: {val_str}")
 
-    # 야간 코스피200 선물 (Eurex)
+    # 코스피 야간선물 (네이버 금융 국내선물 API)
     try:
         fut_url = "https://polling.finance.naver.com/api/realtime/domestic/future/KOSPI200_NIGHT"
         res = requests.get(fut_url, headers=HEADERS, timeout=10)
@@ -47,7 +62,8 @@ def get_global_indices_and_macro():
         price = data.get("closePrice", "")
         rate = data.get("fluctuationsRatio", "")
         if price:
-            sign = "+" if data.get("compareToPreviousPrice", {}).get("name") == "RISING" else "-"
+            direction = data.get("compareToPreviousPrice", {}).get("name", "")
+            sign = "+" if direction == "RISING" else ("-" if direction == "FALLING" else "")
             results.append(f"• *코스피 야간 선물*: {price}pt ({sign}{rate}%)")
         else:
             results.append("• *코스피 야간 선물*: 장 마감 집계 참조")
@@ -57,9 +73,9 @@ def get_global_indices_and_macro():
     return "\n".join(results)
 
 def get_us_broad_movers():
-    """2. 나스닥, 다우존스, S&P 500 3대 지수별 대표 특징주 전수 수집"""
+    """2. 나스닥, 다우, S&P 500 주요 종목 티커/가격/등락률 전수 수집"""
     
-    # 1) 나스닥 & 테크/성장 대표주
+    # 1) 나스닥 & 빅테크
     nasdaq_candidates = [
         ("NVDA", "엔비디아"), ("AAPL", "애플"), ("MSFT", "마이크로소프트"),
         ("TSLA", "테슬라"), ("GOOGL", "알파벳"), ("AMZN", "아마존"),
@@ -67,31 +83,32 @@ def get_us_broad_movers():
         ("PLTR", "팔란티어"), ("QCOM", "퀄컴"), ("SMCI", "슈퍼마이크로")
     ]
     
-    # 2) 다우존스 전통 우량/산업/금융주
+    # 2) 다우존스 대표 우량주
     dow_candidates = [
         ("BA", "보잉"), ("CAT", "캐터필러"), ("GS", "골드만삭스"),
         ("JPM", "JP모건"), ("UNH", "유나이티드헬스"), ("WMT", "월마트"),
         ("HD", "홈디포"), ("CVX", "쉐브론"), ("DIS", "디즈니")
     ]
     
-    # 3) S&P 500 헬스케어/에너지/필수소비재 대표주
+    # 3) S&P 500 헬스케어/방어/플랫폼
     sp500_candidates = [
         ("LLY", "일라이릴리"), ("NVO", "노보노디스크"), ("XOM", "엑슨모빌"),
         ("COST", "코스트코"), ("PFE", "화이자"), ("COIN", "코인베이스")
     ]
 
-    def pick_top_movers(candidates, count=5):
+    def format_movers(candidates, count=6):
         items = []
         for sym, name in candidates:
-            val_str, rate = get_yfinance_ticker_data(sym)
+            val_str, rate, price = get_yfinance_ticker_data(sym)
             if val_str != "집계 대기":
-                items.append((name, sym, val_str, rate))
+                items.append((name, sym, val_str, rate, price))
+        # 등락률 절댓값 기준 정렬
         items.sort(key=lambda x: abs(x[3]), reverse=True)
-        return "\n".join([f"• {x[0]}({x[1]}): {x[2]}" for x in items[:count]])
+        return "\n".join([f"• {x[0]} ({x[1]}): ${x[4]:,.2f} ({'+' if x[3]>=0 else ''}{x[3]:.2f}%)" for x in items[:count]])
 
-    nasdaq_summary = pick_top_movers(nasdaq_candidates, 6)
-    dow_summary = pick_top_movers(dow_candidates, 5)
-    sp500_summary = pick_top_movers(sp500_candidates, 4)
+    nasdaq_summary = format_movers(nasdaq_candidates, 6)
+    dow_summary = format_movers(dow_candidates, 5)
+    sp500_summary = format_movers(sp500_candidates, 4)
 
     return nasdaq_summary, dow_summary, sp500_summary
 
@@ -112,7 +129,7 @@ def get_morning_news(limit=6):
         return f"뉴스 수집 오류: {e}"
 
 def generate_morning_briefing(market_macro, nasdaq_movers, dow_movers, sp_movers, news):
-    """4. Groq 대형 모델 기반 3대 지수 종합 심층 모닝 브리핑 (4페이지 분할)"""
+    """4. Groq 대형 모델 기반 4페이지 심층 모닝 브리핑 작성"""
     api_key = os.environ.get("GROQ_API_KEY", "").strip()
     if not api_key:
         return make_fallback_morning(market_macro, nasdaq_movers, dow_movers, sp_movers, news)
@@ -122,32 +139,39 @@ def generate_morning_briefing(market_macro, nasdaq_movers, dow_movers, sp_movers
 
     prompt = f"""
 당신은 대형 증권사 글로벌 시황 수석 애널리스트이자 프라이빗 뱅커(PB)입니다.
-전날 뉴욕 증시 마감 데이터와 나스닥, 다우존스, S&P 500의 지수별 특징주 시세를 종합하여 VIP 고객을 위한 '미국 3대 지수 통합 아침 장전 브리핑'을 매우 상세하고 깊이 있게 작성하십시오.
-글이 잘리지 않도록 각 문장을 깔끔하게 완결 지으며, 반드시 **[SPLIT_POINT]** 구분자를 정확히 3번 포함하여 총 4개 섹션(4개 페이지)으로 나누어 작성해야 합니다.
+아래 제공된 [수집 데이터]를 바탕으로 VIP 고객용 프리미엄 '미국 3대 지수 통합 아침 장전 브리핑'을 매우 상세하고 깊이 있게 작성하십시오.
 
-[수집 데이터]
-1. 글로벌 주요 지수 및 매크로:
+[수집 데이터 - 실제 수치 반영 필수]
+1. 글로벌 주요 지수 및 매크로 (실제 등락 수치 반드시 본문에 언급):
 {market_macro}
-2. 나스닥 핵심 빅테크 및 변동성 상위주:
+2. 나스닥 핵심 빅테크 및 변동성 상위주 (티커, 종가, 등락률):
 {nasdaq_movers}
-3. 다우존스 전통 산업·금융·소비재 특징주:
+3. 다우존스 전통 우량·산업·금융주 (티커, 종가, 등락률):
 {dow_movers}
-4. S&P 500 바이오/에너지/플랫폼 특징주:
+4. S&P 500 헬스케어·에너지·방어주 (티커, 종가, 등락률):
 {sp_movers}
 5. 장전 핵심 뉴스 헤드라인:
 {news}
 
-[출력 양식 - 반드시 아래 순서와 [SPLIT_POINT]를 준수하세요]
+[작성 및 출력 지침]
+- **데이터 활용 원칙**: 절대로 "구체적인 등락 수치가 제공되지 않아 파악하기 어렵다"거나 "수치가 누락되었다"는 말을 하지 마십시오. 위에 주어진 실제 지수/가격/등락률 수치를 본문에 직접 숫자로 인용하며 분석하십시오.
+- **종목 언급 원칙**: 본문에서 미국 주식을 설명할 때는 반드시 티커와 실제 가격, 등락률을 함께 병기하십시오. 예: 엔비디아(NVDA, $135.20, +4.15%)
+- **글로벌 이슈 5가지**: 장전 핵심 글로벌 이슈는 반드시 1번부터 5번까지 5가지를 작성하십시오.
+- **분할 전송**: 반드시 **[SPLIT_POINT]** 구분자를 정확히 3번 출력하여 총 4개 섹션으로 나누어지도록 하십시오.
+
+---
+
+[출력 양식 - 반드시 아래 순서와 [SPLIT_POINT] 준수]
 
 [1부: 매크로 총평 및 헤드라인]
 ☀️ **간밤의 글로벌 증시 마감 총평**
-- 나스닥, 다우존스, S&P 500, 필라델피아 반도체 지수의 실제 등락 수치 비교 분석
-- 기술주(나스닥)와 전통 가치주(다우) 간의 로테이션(순환매) 흐름 상세 해설
+- 나스닥, 다우존스, S&P 500, 필라델피아 반도체 지수의 실제 등락 수치와 퍼센트를 구체적으로 비교 분석
+- 기술주(나스닥)와 전통 가치주(다우) 간의 순환매 및 지수별 차별화 흐름 상세 해설
 
 🌐 **주요 매크로 지표 심층 분석**
-- 원/달러 환율 흐름과 외국인 자금 방향성 영향도
-- WTI 국제유가 변동 원인 및 물가/금리 경로 영향
-- 필라델피아 반도체 지수 등락에 따른 국내 반도체 영향
+- 원/달러 환율 실제 수치 및 등락률 기반 외국인 수급 영향도 분석
+- WTI 국제유가 실제 수치 및 등락 배경, 원자재/물가 경로 분석
+- 필라델피아 반도체 지수 실제 등락률 기반 국내 반도체(삼성전자, SK하이닉스) 파급 효과
 
 🗞️ **오늘 아침 주요 글로벌/증시 뉴스 헤드라인**
 - 수집된 뉴스 헤드라인 원본을 불릿포인트(•)로 그대로 나열
@@ -156,30 +180,30 @@ def generate_morning_briefing(market_macro, nasdaq_movers, dow_movers, sp_movers
 
 [2부: 나스닥 및 기술·AI 섹터 심층 분석]
 💻 **나스닥(NASDAQ) 및 반도체/AI 특징주 분석**
-- 엔비디아, 애플, 테슬라, 마이크로소프트 등 빅테크 및 반도체 특징주 개별 등락 배경
-- AI, 소프트웨어, 클라우드, 전기차 업황 관련 핵심 이슈 및 시장 영향 해설
+- 수집된 나스닥 종목들의 종가와 등락률을 명시하며 개별 등락 요인 및 배경 상세 해설
+- AI 가속기, 클라우드, 소프트웨어, 전기차 업황 관련 핵심 이슈 및 시장 영향
 
-📰 **장전 핵심 글로벌 이슈 3가지**
-- 시장에 가장 큰 충격을 준 글로벌 핵심 이슈 3가지 선별 및 심층 분석 (1, 2, 3 번호 부여)
+📰 **장전 핵심 글로벌 이슈 5가지**
+- 시장에 가장 큰 영향을 준 글로벌 핵심 이슈 5가지를 선별하여 배경 및 시사점 심층 분석 (1번부터 5번까지 번호 부여)
 
 [SPLIT_POINT]
 
 [3부: 다우존스 & S&P 500 전통 우량주 및 경기민감 섹터 분석]
 🏛️ **다우존스(DOW) 산업·금융·가치주 동향**
-- 골드만삭스/JP모건(금융), 보잉/캐터필러(산업재), 쉐브론(에너지), 월마트(소비재) 등 다우 핵심 종목의 등락 요인 및 경기 전망
+- 수집된 다우 종목들의 종가와 등락률을 명시하며 금융, 산업재, 방산, 소비재 종목별 등락 원인 분석
 
 🏥 **S&P 500 헬스케어·에너지·방어주 특징**
-- 일라이릴리, 노보노디스크 등 비만치료제/바이오 섹터 및 전통 소비재·원자재 기업들의 특징적인 흐름 분석
+- 수집된 S&P 500 종목들의 종가와 등락률을 명시하며 바이오/비만치료제, 에너지, 유통 방어주의 흐름 분석
 
 [SPLIT_POINT]
 
 [4부: 국내 증시 개장 전망 및 실전 PB 투자 전략]
 🎯 **야간선물 점검 및 오늘 코스피/코스닥 개장 전망**
-- 코스피 야간 선물의 흐름으로 본 오늘 국내 지수 시초가 예상 흐름 (갭상승/갭하락/보합)
-- 미국 3대 지수 흐름이 오늘 장초반 국내 기관/외국인 수급에 미칠 영향
+- 코스피 야간 선물의 실제 수치와 등락률을 바탕으로 오늘 국내 지수 시초가 분위기(갭상승/갭하락/보합) 전망
+- 미국 증시 흐름이 오늘 장초반 국내 외국인/기관 수급에 미칠 영향 분석
 
 🚀 **오늘 주목할 국내 주도 테마 3선**
-- 미 증시 강세 섹터와 연동되어 오늘 국내 증시에서 강세를 보일 유력 테마 3가지 및 관련 종목군
+- 미 증시 강세 섹터와 연동되어 오늘 국내 증시에서 부각될 유력 테마 3가지 및 관련 수혜주
 
 💡 **오늘장 PB 실전 투자 전략**
 1. 장초반 시초가 갭 형성 시 매매 대응 원칙
@@ -192,7 +216,7 @@ def generate_morning_briefing(market_macro, nasdaq_movers, dow_movers, sp_movers
             response = client.chat.completions.create(
                 model=m,
                 messages=[
-                    {"role": "system", "content": "당신은 증권사 글로벌 수석 PB 애널리스트입니다. 풍부한 분량과 깊이 있는 분석으로 격식 있는 한국어로 작성하십시오. 지정된 3개의 [SPLIT_POINT]를 빠짐없이 출력하세요."},
+                    {"role": "system", "content": "당신은 증권사 글로벌 수석 PB 애널리스트입니다. 제공된 실제 수치를 적극 활용하여 격식 있는 한국어로 전문적인 리포트를 작성하십시오. 지정된 3개의 [SPLIT_POINT]를 정확히 출력하세요."},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.3,
@@ -221,7 +245,7 @@ def make_fallback_morning(market_macro, nasdaq_movers, dow_movers, sp_movers, ne
 {news}"""
 
 def send_telegram(text):
-    """5. 텔레그램 분할 안전 전송 (3~4페이지 자동 분할)"""
+    """5. 텔레그램 4분할 안전 전송"""
     bot_token = os.environ.get("TELEGRAM_TOKEN", "").strip()
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
