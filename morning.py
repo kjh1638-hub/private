@@ -1,11 +1,12 @@
 import os
+import re
 import requests
 import yfinance as yf
 from groq import Groq
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Referer": "https://m.stock.naver.com/"
+    "Referer": "https://finance.naver.com/"
 }
 
 def get_yfinance_ticker_data(ticker_symbol):
@@ -37,60 +38,71 @@ def get_yfinance_ticker_data(ticker_symbol):
     return "집계 대기", 0.0, 0.0
 
 def get_kospi200_night_futures():
-    """코스피200 선물 최근월물 실제 체결가 및 전일 정규장 종가 대비 직접 계산"""
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Referer": "https://m.stock.naver.com/"
-    }
-
+    """코스피200 야간선물(Eurex) 한글 인코딩(CP949) 및 태그 스트리핑 기반 실제 시세 수집"""
+    
+    # 1. 네이버 증권 시세 메인 (CP949 한글 디코딩 필수)
     try:
-        url = "https://m.stock.naver.com/api/future/KOSPI200/integration"
-        res = requests.get(url, headers=headers, timeout=10)
-        data = res.json()
-        
-        item_list = data.get("itemList", []) or data.get("stockItemList", [])
-        if item_list:
-            top_item = max(item_list, key=lambda x: float(str(x.get("totalVolume", "0")).replace(",", "") or 0))
+        url = "https://finance.naver.com/sise/"
+        res = requests.get(url, headers=HEADERS, timeout=10)
+        # 네이버 PC 웹페이지는 EUC-KR(CP949) 인코딩이므로 강제 변환
+        html = res.content.decode("cp949", "ignore")
+        clean_text = re.sub(r'<[^>]+>', ' ', html)
+        clean_text = ' '.join(clean_text.split())
+
+        idx = clean_text.find("야간선물")
+        if idx != -1:
+            chunk = clean_text[idx:idx+150]
+            # 야간선물 텍스트 부근에서 가격(예: 350.25)과 등락률(예: +2.15% 또는 2.15%) 추출
+            price_m = re.search(r'([\d,]+\.\d{2})', chunk)
+            rate_m = re.search(r'([+-]?[\d,]+(?:\.\d+)?%)', chunk)
             
-            close_p = float(str(top_item.get("closePrice") or top_item.get("nowPrice", "0")).replace(",", ""))
-            base_p = float(str(top_item.get("basePrice") or top_item.get("previousClosePrice", "0")).replace(",", ""))
-            
-            if close_p > 0 and base_p > 0:
-                diff = close_p - base_p
-                calc_rate = (diff / base_p) * 100
-                sign = "+" if calc_rate >= 0 else ""
-                name = top_item.get("stockName", "선물 최근월물")
-                return f"{close_p:,.2f}pt ({sign}{calc_rate:.2f}%) [{name}]"
-    except Exception:
-        pass
+            if price_m and rate_m:
+                price = price_m.group(1)
+                rate = rate_m.group(1)
+                sign = "+" if ("상승" in chunk or "+" in rate) and not rate.startswith("-") else ""
+                clean_rate = rate if (rate.startswith("+") or rate.startswith("-")) else f"{sign}{rate}"
+                return f"{price}pt ({clean_rate})"
+    except Exception as e:
+        print(f"[야간선물 1차 실패] {e}")
 
+    # 2. 네이버 모바일 통합 검색 (UTF-8) 백업
     try:
-        daum_url = "https://finance.daum.net/api/quote/KRX:10100/summary"
-        d_headers = {"User-Agent": headers["User-Agent"], "Referer": "https://finance.daum.net/"}
-        res = requests.get(daum_url, headers=d_headers, timeout=10)
-        d = res.json().get("data", {})
-        
-        trade_p = float(d.get("tradePrice", 0))
-        prev_p = float(d.get("prevClosingPrice", 0))
-        if trade_p > 0 and prev_p > 0:
-            diff = trade_p - prev_p
-            rate = (diff / prev_p) * 100
-            sign = "+" if rate >= 0 else ""
-            return f"{trade_p:,.2f}pt ({sign}{rate:.2f}%)"
-    except Exception:
-        pass
+        url = "https://m.search.naver.com/search.naver?query=%EC%BD%94%EC%8A%A4%ED%94%BC200+%EC%95%BC%EA%B0%84%EC%84%A0%EB%AC%BC"
+        m_headers = {"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15"}
+        res = requests.get(url, headers=m_headers, timeout=10)
+        clean_text = re.sub(r'<[^>]+>', ' ', res.text)
+        clean_text = ' '.join(clean_text.split())
 
+        idx = clean_text.find("야간선물")
+        if idx != -1:
+            chunk = clean_text[idx:idx+150]
+            price_m = re.search(r'([\d,]+\.\d{2})', chunk)
+            rate_m = re.search(r'([+-]?[\d,]+(?:\.\d+)?%)', chunk)
+            if price_m and rate_m:
+                price = price_m.group(1)
+                rate = rate_m.group(1)
+                sign = "+" if ("상승" in chunk or "+" in rate) and not rate.startswith("-") else ""
+                clean_rate = rate if (rate.startswith("+") or rate.startswith("-")) else f"{sign}{rate}"
+                return f"{price}pt ({clean_rate})"
+    except Exception as e:
+        print(f"[야간선물 2차 실패] {e}")
+
+    # 3. 다음(Daum) 통합 검색 백업
     try:
-        url_poll = "https://polling.finance.naver.com/api/realtime/domestic/index/NIGHT_KOSPI200"
-        res = requests.get(url_poll, headers=headers, timeout=10)
-        item = res.json().get("datas", [{}])[0]
-        price = item.get("closePrice")
-        rate = item.get("fluctuationsRatio")
-        if price and rate:
-            sign = "+" if item.get("compareToPreviousPrice", {}).get("name") == "RISING" else "-"
-            return f"{price}pt ({sign}{rate}%)"
-    except Exception:
-        pass
+        url = "https://search.daum.net/search?w=tot&q=%EC%BD%94%EC%8A%A4%ED%94%BC200%20%EC%95%BC%EA%B0%84%EC%84%A0%EB%AC%BC"
+        res = requests.get(url, headers=HEADERS, timeout=10)
+        clean_text = re.sub(r'<[^>]+>', ' ', res.text)
+        clean_text = ' '.join(clean_text.split())
+
+        idx = clean_text.find("야간선물")
+        if idx != -1:
+            chunk = clean_text[idx:idx+150]
+            price_m = re.search(r'([\d,]+\.\d{2})', chunk)
+            rate_m = re.search(r'([+-]?[\d,]+(?:\.\d+)?%)', chunk)
+            if price_m and rate_m:
+                return f"{price_m.group(1)}pt ({rate_m.group(1)})"
+    except Exception as e:
+        print(f"[야간선물 3차 실패] {e}")
 
     return "야간선물 집계 대기"
 
@@ -110,6 +122,7 @@ def get_global_indices_and_macro():
         results.append(f"• *{name}*: {val_str}")
 
     night_fut = get_kospi200_night_futures()
+    print(f"★ [수집 확인] 코스피 야간선물: {night_fut}")
     results.append(f"• *코스피 야간 선물*: {night_fut}")
 
     return "\n".join(results)
@@ -189,8 +202,8 @@ def generate_morning_briefing(market_macro, nasdaq_movers, dow_movers, sp_movers
 {news}
 
 [작성 및 출력 지침]
-- **데이터 인용 원칙**: 절대로 "수치가 제공되지 않았다"거나 "수치가 누락되었다"는 표현을 쓰지 마십시오. 위에 주어진 실제 지수/가격/등락률 수치를 본문에 직접 숫자로 인용하며 분석하십시오.
-- **코스피 야간선물 분석**: 4부에서 코스피 야간선물의 실제 수치(지수 포인트 및 등락률)를 직접 인용하여 오늘 아침 개장 갭 방향(상승/하락/보합)을 명확하게 짚어주십시오.
+- **데이터 인용 원칙**: 위에 주어진 실제 지수/가격/등락률 수치를 본문에 직접 숫자로 인용하며 분석하십시오.
+- **코스피 야간선물 분석**: 4부에서 코스피 야간선물의 실제 수치(지수 포인트 및 등락률)를 직접 인용하여 오늘 아침 개장 갭 방향(상승/하락/보합)을 명확하게 짚어주십시오. 수치에 0.00%라고 적혀 있지 않은 한 절대로 0% 변동이라거나 보합세라고 임의 왜곡하지 마십시오.
 - **종목 언급 원칙**: 본문에서 미국 주식을 설명할 때는 반드시 티커와 실제 가격, 등락률을 함께 병기하십시오. 예: 엔비디아(NVDA, $135.20, +4.15%)
 - **글로벌 이슈 5가지**: 장전 핵심 글로벌 이슈는 반드시 1번부터 5번까지 5가지를 작성하십시오.
 - **분할 전송**: 반드시 **[SPLIT_POINT]** 구분자를 정확히 3번 출력하여 총 4개 섹션으로 나누어지도록 하십시오.
