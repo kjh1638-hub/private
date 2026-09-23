@@ -42,7 +42,7 @@ def get_market_supply():
                 supply_results.append(f"• {m_name}: 개인 {p_val}억 / 외인 {f_val}억 / 기관 {i_val}억")
         except Exception:
             continue
-    return "\n".join(supply_results) if supply_results else "• 수급: 장마감 후 최종 공시 집계 참조"
+    return "\n".join(supply_results) if supply_results else "• 수급: 장마감 후 집계 데이터 참조"
 
 def get_market_news(limit=6):
     """3. 네이버 주요 뉴스 헤드라인 수집"""
@@ -97,52 +97,59 @@ def get_top_movers_naver(limit=10):
     return "\n".join(top_risers), "\n".join(top_fallers)
 
 def generate_briefing(market_info, supply_info, news_headlines, top_risers, top_fallers):
-    """5. 고성능 모델 기반 누락 없는 프리미엄 브리핑 작성"""
+    """5. 고성능 모델 기반 상세 브리핑 (최대 토큰 확장)"""
     api_key = os.environ.get("GROQ_API_KEY", "").strip()
     if not api_key:
         return make_fallback_report(market_info, supply_info, news_headlines, top_risers, top_fallers)
 
     client = Groq(api_key=api_key)
-
-    priority_models = [
-        "openai/gpt-oss-120b",
-        "openai/gpt-oss-20b"
-    ]
+    priority_models = ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]
 
     prompt = f"""
 당신은 대형 증권사 수석 PB 애널리스트입니다.
-아래 수집된 당일 국내 증시 마감 데이터를 바탕으로 VIP 고객용 텔레그램 마감 브리핑을 완성도 높게 작성해주세요.
-중간에 잘리지 않도록 각 항목을 간결하고 명확하게 핵심 위주로 작성하고, **반드시 아래 6가지 섹션을 모두 포함하여 끝까지 작성**하십시오.
+제공된 당일 국내 증시 마감 데이터를 바탕으로 VIP 고객용 텔레그램 마감 브리핑을 깊이 있고 상세하게 작성해주세요.
+분량 제한 때문에 내용을 압축하거나 생략하지 마시고, 각 항목마다 충분한 배경 설명과 개별 종목 분석을 담아주십시오.
 
 [수집 데이터]
 1. 지수: {market_info}
-2. 투자자별 수급:
+2. 수급:
 {supply_info}
 3. 주요 뉴스 헤드라인:
 {news_headlines}
-4. 상승률 Top 10:
+4. 당일 상승률 Top 10:
 {top_risers}
-5. 하락률 Top 10:
+5. 당일 하락률 Top 10:
 {top_fallers}
 
-[출력 양식]
-📊 **국내 증시 마감 요약**
-- 지수 흐름 및 오늘 시장의 전반적인 성격 요약
+[작성 형식 및 필수 포함 항목]
+
+📊 **국내 증시 마감 총평**
+- 코스피와 코스닥 지수 수치 및 등락폭 분석
+- 대형주/성장주 흐름, 시장 내부 분위기 및 총평을 4줄 이상 깊이 있게 서술
 
 💰 **투자자별 수급 동향**
-- 코스피/코스닥 개인, 외국인, 기관 매매 특징 및 시사점
+- 코스피/코스닥 개인, 외국인, 기관 매매 패턴 분석
+- 외국인/기관 수급의 성격과 시장에 미친 영향 시사점
 
 📰 **오늘의 핵심 이슈 3가지**
-- 시장에 영향을 준 주요 뉴스 3가지를 선별해 배경 요약
+- 시장을 움직인 가장 중요한 3대 테마/이슈 선별 요약 (1, 2, 3 번호 부여 및 상세 배경 서술)
 
-🚀 **급등 Top 10 및 주도 테마**
-- 상승률 상위 종목들의 공통 테마(섹터) 및 핵심 상승 원인 요약 (표 대신 불릿포인트로 간결하게 정리)
+🗞️ **오늘의 주요 뉴스 헤드라인**
+- 수집된 주요 뉴스 헤드라인 원본 목록을 불릿포인트(•)로 그대로 나열
 
-📉 **급락 Top 10 및 약세 배경**
-- 하락률 상위 종목들의 공통적인 약세 요인(악재/차익실현 등) 요약
+[SPLIT_POINT]
+
+🚀 **주도 섹터 및 급등 Top 10 상세 분석**
+- 상승률 상위 10개 종목 각각의 상승 배경 및 개별 호재 요약 (1번부터 10번까지 빠짐없이 종목명, 등락률, 주요 상승 요인을 명확히 기술)
+- 전체 주도 테마 및 공통 상승 원인 종합 분석
+
+📉 **급락 Top 10 및 약세 배경 분석**
+- 하락률 상위 10개 종목 각각의 하락 요인 및 약세 배경 요약 (1번부터 10번까지 빠짐없이 종목명, 등락률, 주요 하락 원인을 명확히 기술)
+- 공통 차익실현 및 약세 배경 종합 분석
 
 💡 **내일장 대응 포인트**
-- 투자자가 주목해야 할 수급 및 거시 변수 체크포인트 2가지
+1. 수급 흐름 체크포인트
+2. 대외 거시 변수 및 모니터링 요소
 """
 
     for m in priority_models:
@@ -151,11 +158,11 @@ def generate_briefing(market_info, supply_info, news_headlines, top_risers, top_
             response = client.chat.completions.create(
                 model=m,
                 messages=[
-                    {"role": "system", "content": "당신은 증권사 수석 PB입니다. 모바일 가독성을 최우선으로 하여 명확하고 유려한 한국어로 작성하세요. 요청받은 모든 섹션을 빠짐없이 완성해야 합니다."},
+                    {"role": "system", "content": "당신은 냉철하고 분석력이 뛰어난 대형 증권사 수석 PB 애널리스트입니다. 정중하고 격식 있는 한국어로 전달하며, 모든 요청 항목을 풍부한 설명과 함께 누락 없이 완성하십시오."},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.3,
-                max_tokens=1500  # 글이 잘리지 않도록 토큰 확장
+                max_tokens=3500  # 풍부한 분량을 위해 3500토큰으로 확장
             )
             print(f"★ 모델 [{m}] 브리핑 생성 성공!")
             return response.choices[0].message.content
@@ -174,7 +181,7 @@ def make_fallback_report(market_info, supply_info, news_headlines, top_risers, t
 
 📰 **오늘의 주요 뉴스 헤드라인**
 {news_headlines}
-
+[SPLIT_POINT]
 🚀 **당일 상승률 Top 10**
 {top_risers}
 
@@ -182,18 +189,27 @@ def make_fallback_report(market_info, supply_info, news_headlines, top_risers, t
 {top_fallers}"""
 
 def send_telegram(text):
-    """6. 텔레그램 전송"""
+    """6. 텔레그램 전송 (메시지 한도 초과 시 2개로 분할 전송)"""
     bot_token = os.environ.get("TELEGRAM_TOKEN", "").strip()
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
 
-    max_len = 3900
-    chunks = [text[i:i+max_len] for i in range(0, len(text), max_len)]
-    
-    for chunk in chunks:
-        res = requests.post(url, json={"chat_id": chat_id, "text": chunk, "parse_mode": "Markdown"})
+    # [SPLIT_POINT] 태그가 있으면 1부와 2부로 깔끔하게 분할
+    if "[SPLIT_POINT]" in text:
+        parts = text.split("[SPLIT_POINT]")
+    else:
+        # 태그가 없더라도 3000자 초과 시 문단 단위 분할
+        max_len = 3000
+        parts = [text[i:i+max_len] for i in range(0, len(text), max_len)]
+
+    for part in parts:
+        msg = part.strip()
+        if not msg:
+            continue
+        # 마크다운 전송 시도 후 에러 시 일반 텍스트 전송
+        res = requests.post(url, json={"chat_id": chat_id, "text": msg, "parse_mode": "Markdown"})
         if res.status_code != 200:
-            requests.post(url, json={"chat_id": chat_id, "text": chunk})
+            requests.post(url, json={"chat_id": chat_id, "text": msg})
 
 if __name__ == "__main__":
     market_info = get_market_indices()
