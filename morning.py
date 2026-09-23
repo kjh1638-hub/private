@@ -12,8 +12,6 @@ def get_yfinance_ticker_data(ticker_symbol):
     """야후 파이낸스 fast_info 및 history 이중 조회로 누락 없는 시세 수집"""
     try:
         t = yf.Ticker(ticker_symbol)
-        
-        # 1차 시도: fast_info (가장 빠름)
         try:
             fi = t.fast_info
             price = fi.last_price
@@ -26,7 +24,6 @@ def get_yfinance_ticker_data(ticker_symbol):
         except Exception:
             pass
 
-        # 2차 시도: history 1개월 조회
         hist = t.history(period="1mo")
         if not hist.empty and len(hist) >= 2:
             close = hist['Close'].iloc[-1]
@@ -38,6 +35,49 @@ def get_yfinance_ticker_data(ticker_symbol):
     except Exception:
         pass
     return "집계 대기", 0.0, 0.0
+
+def get_kospi200_night_futures():
+    """코스피200 야간/연계선물 3중 수집"""
+    try:
+        url = "https://m.stock.naver.com/api/future/KOSPI200/integration"
+        res = requests.get(url, headers=HEADERS, timeout=10)
+        data = res.json()
+        fut_info = data.get("totalInfos", {}) or data.get("stockItemTotalInfos", {})
+        price = fut_info.get("closePrice") or fut_info.get("nowPrice")
+        rate = fut_info.get("fluctuationsRatio") or fut_info.get("changeRate")
+        if price and rate:
+            r_val = float(str(rate).replace("%", "").replace(",", "") or 0)
+            sign = "+" if r_val >= 0 else ""
+            return f"{price}pt ({sign}{rate}%)"
+    except Exception:
+        pass
+
+    try:
+        fallback_url = "https://polling.finance.naver.com/api/realtime/domestic/stock/10100"
+        res = requests.get(fallback_url, headers=HEADERS, timeout=10)
+        item = res.json().get("datas", [{}])[0]
+        price = item.get("closePrice")
+        rate = item.get("fluctuationsRatio")
+        if price and rate:
+            sign = "+" if item.get("compareToPreviousPrice", {}).get("name") == "RISING" else "-"
+            return f"{price}pt ({sign}{rate}%)"
+    except Exception:
+        pass
+
+    try:
+        daum_url = "https://finance.daum.net/api/quote/KRX:10100/summary"
+        headers_daum = {"User-Agent": HEADERS["User-Agent"], "Referer": "https://finance.daum.net/"}
+        res = requests.get(daum_url, headers=headers_daum, timeout=10)
+        d = res.json().get("data", {})
+        price = d.get("tradePrice")
+        rate = d.get("changeRate", 0) * 100
+        if price:
+            sign = "+" if rate >= 0 else ""
+            return f"{price:,.2f}pt ({sign}{rate:.2f}%)"
+    except Exception:
+        pass
+
+    return "장 마감 정산 집계 중"
 
 def get_global_indices_and_macro():
     """1. 글로벌 주요 지수, 환율, 유가, 야간선물 수집"""
@@ -54,43 +94,24 @@ def get_global_indices_and_macro():
         val_str, _, _ = get_yfinance_ticker_data(symbol)
         results.append(f"• *{name}*: {val_str}")
 
-    # 코스피 야간선물 (네이버 금융 국내선물 API)
-    try:
-        fut_url = "https://polling.finance.naver.com/api/realtime/domestic/future/KOSPI200_NIGHT"
-        res = requests.get(fut_url, headers=HEADERS, timeout=10)
-        data = res.json().get("datas", [{}])[0]
-        price = data.get("closePrice", "")
-        rate = data.get("fluctuationsRatio", "")
-        if price:
-            direction = data.get("compareToPreviousPrice", {}).get("name", "")
-            sign = "+" if direction == "RISING" else ("-" if direction == "FALLING" else "")
-            results.append(f"• *코스피 야간 선물*: {price}pt ({sign}{rate}%)")
-        else:
-            results.append("• *코스피 야간 선물*: 장 마감 집계 참조")
-    except Exception:
-        results.append("• *코스피 야간 선물*: 장 마감 집계 참조")
+    night_fut = get_kospi200_night_futures()
+    results.append(f"• *코스피 야간 선물*: {night_fut}")
 
     return "\n".join(results)
 
 def get_us_broad_movers():
     """2. 나스닥, 다우, S&P 500 주요 종목 티커/가격/등락률 전수 수집"""
-    
-    # 1) 나스닥 & 빅테크
     nasdaq_candidates = [
         ("NVDA", "엔비디아"), ("AAPL", "애플"), ("MSFT", "마이크로소프트"),
         ("TSLA", "테슬라"), ("GOOGL", "알파벳"), ("AMZN", "아마존"),
         ("META", "메타"), ("AMD", "AMD"), ("AVGO", "브로드컴"),
         ("PLTR", "팔란티어"), ("QCOM", "퀄컴"), ("SMCI", "슈퍼마이크로")
     ]
-    
-    # 2) 다우존스 대표 우량주
     dow_candidates = [
         ("BA", "보잉"), ("CAT", "캐터필러"), ("GS", "골드만삭스"),
         ("JPM", "JP모건"), ("UNH", "유나이티드헬스"), ("WMT", "월마트"),
         ("HD", "홈디포"), ("CVX", "쉐브론"), ("DIS", "디즈니")
     ]
-    
-    # 3) S&P 500 헬스케어/방어/플랫폼
     sp500_candidates = [
         ("LLY", "일라이릴리"), ("NVO", "노보노디스크"), ("XOM", "엑슨모빌"),
         ("COST", "코스트코"), ("PFE", "화이자"), ("COIN", "코인베이스")
@@ -102,7 +123,6 @@ def get_us_broad_movers():
             val_str, rate, price = get_yfinance_ticker_data(sym)
             if val_str != "집계 대기":
                 items.append((name, sym, val_str, rate, price))
-        # 등락률 절댓값 기준 정렬
         items.sort(key=lambda x: abs(x[3]), reverse=True)
         return "\n".join([f"• {x[0]} ({x[1]}): ${x[4]:,.2f} ({'+' if x[3]>=0 else ''}{x[3]:.2f}%)" for x in items[:count]])
 
@@ -139,7 +159,7 @@ def generate_morning_briefing(market_macro, nasdaq_movers, dow_movers, sp_movers
 
     prompt = f"""
 당신은 대형 증권사 글로벌 시황 수석 애널리스트이자 프라이빗 뱅커(PB)입니다.
-아래 제공된 [수집 데이터]를 바탕으로 VIP 고객용 프리미엄 '미국 3대 지수 통합 아침 장전 브리핑'을 매우 상세하고 깊이 있게 작성하십시오.
+아래 제공된 [수집 데이터]를 바탕으로 VIP 고객용 프리미엄 '미국 3대 지수 통합 아침 장전 브리핑'을 상세하고 깊이 있게 작성하십시오.
 
 [수집 데이터 - 실제 수치 반영 필수]
 1. 글로벌 주요 지수 및 매크로 (실제 등락 수치 반드시 본문에 언급):
@@ -155,6 +175,7 @@ def generate_morning_briefing(market_macro, nasdaq_movers, dow_movers, sp_movers
 
 [작성 및 출력 지침]
 - **데이터 활용 원칙**: 절대로 "구체적인 등락 수치가 제공되지 않아 파악하기 어렵다"거나 "수치가 누락되었다"는 말을 하지 마십시오. 위에 주어진 실제 지수/가격/등락률 수치를 본문에 직접 숫자로 인용하며 분석하십시오.
+- **코스피 야간선물 분석**: 4부에서 코스피 야간선물의 실제 수치(지수 포인트 및 등락률)를 직접 인용하여 오늘 아침 개장 갭 방향(상승/하락/보합)을 명확하게 짚어주십시오.
 - **종목 언급 원칙**: 본문에서 미국 주식을 설명할 때는 반드시 티커와 실제 가격, 등락률을 함께 병기하십시오. 예: 엔비디아(NVDA, $135.20, +4.15%)
 - **글로벌 이슈 5가지**: 장전 핵심 글로벌 이슈는 반드시 1번부터 5번까지 5가지를 작성하십시오.
 - **분할 전송**: 반드시 **[SPLIT_POINT]** 구분자를 정확히 3번 출력하여 총 4개 섹션으로 나누어지도록 하십시오.
