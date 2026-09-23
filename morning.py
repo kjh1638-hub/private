@@ -1,12 +1,11 @@
 import os
-import re
 import requests
 import yfinance as yf
 from groq import Groq
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Referer": "https://finance.naver.com/"
+    "Referer": "https://m.stock.naver.com/"
 }
 
 def get_yfinance_ticker_data(ticker_symbol):
@@ -38,47 +37,57 @@ def get_yfinance_ticker_data(ticker_symbol):
     return "집계 대기", 0.0, 0.0
 
 def get_kospi200_night_futures():
-    """코스피200 야간선물(Eurex) 최종 마감 정산값 수집 (낮 시간대에도 수치 유지)"""
-    # 1. 네이버 증권 시세 메인 화면 파싱 (가장 정확한 야간선물 최종 확정치)
-    try:
-        url = "https://finance.naver.com/sise/"
-        res = requests.get(url, headers=HEADERS, timeout=10)
-        html = res.text
-        # 야간선물 텍스트 부근 매칭
-        match = re.search(r'야간선물.*?([0-9]{3}\.[0-9]{2}).*?([+-]?[0-9]+\.[0-9]+%)', html, re.DOTALL)
-        if match:
-            price = match.group(1)
-            rate = match.group(2)
-            return f"{price}pt ({rate})"
-    except Exception:
-        pass
+    """코스피200 선물 최근월물 실제 체결가 및 전일 정규장 종가 대비 직접 계산"""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Referer": "https://m.stock.naver.com/"
+    }
 
-    # 2. 네이버 모바일 지표 trend API (장 마감 후에도 직전 야간 세션 유지)
     try:
-        url_trend = "https://m.stock.naver.com/api/index/NIGHT_KOSPI200/trend"
-        res = requests.get(url_trend, headers=HEADERS, timeout=10)
+        url = "https://m.stock.naver.com/api/future/KOSPI200/integration"
+        res = requests.get(url, headers=headers, timeout=10)
         data = res.json()
-        trend_list = data.get("bizTrendList", []) if isinstance(data, dict) else []
-        if trend_list:
-            latest = trend_list[0]
-            price = latest.get("closePrice")
-            rate = latest.get("fluctuationsRatio")
-            if price and rate:
-                sign = "+" if float(str(rate).replace("%", "") or 0) >= 0 else ""
-                return f"{price}pt ({sign}{rate}%)"
+        
+        item_list = data.get("itemList", []) or data.get("stockItemList", [])
+        if item_list:
+            top_item = max(item_list, key=lambda x: float(str(x.get("totalVolume", "0")).replace(",", "") or 0))
+            
+            close_p = float(str(top_item.get("closePrice") or top_item.get("nowPrice", "0")).replace(",", ""))
+            base_p = float(str(top_item.get("basePrice") or top_item.get("previousClosePrice", "0")).replace(",", ""))
+            
+            if close_p > 0 and base_p > 0:
+                diff = close_p - base_p
+                calc_rate = (diff / base_p) * 100
+                sign = "+" if calc_rate >= 0 else ""
+                name = top_item.get("stockName", "선물 최근월물")
+                return f"{close_p:,.2f}pt ({sign}{calc_rate:.2f}%) [{name}]"
     except Exception:
         pass
 
-    # 3. 네이버 파생 지수 basic API fallback
     try:
-        url_basic = "https://m.stock.naver.com/api/future/KOSPI200_NIGHT/basic"
-        res = requests.get(url_basic, headers=HEADERS, timeout=10)
-        d = res.json()
-        price = d.get("closePrice") or d.get("nowPrice")
-        rate = d.get("fluctuationsRatio") or d.get("changeRate")
+        daum_url = "https://finance.daum.net/api/quote/KRX:10100/summary"
+        d_headers = {"User-Agent": headers["User-Agent"], "Referer": "https://finance.daum.net/"}
+        res = requests.get(daum_url, headers=d_headers, timeout=10)
+        d = res.json().get("data", {})
+        
+        trade_p = float(d.get("tradePrice", 0))
+        prev_p = float(d.get("prevClosingPrice", 0))
+        if trade_p > 0 and prev_p > 0:
+            diff = trade_p - prev_p
+            rate = (diff / prev_p) * 100
+            sign = "+" if rate >= 0 else ""
+            return f"{trade_p:,.2f}pt ({sign}{rate:.2f}%)"
+    except Exception:
+        pass
+
+    try:
+        url_poll = "https://polling.finance.naver.com/api/realtime/domestic/index/NIGHT_KOSPI200"
+        res = requests.get(url_poll, headers=headers, timeout=10)
+        item = res.json().get("datas", [{}])[0]
+        price = item.get("closePrice")
+        rate = item.get("fluctuationsRatio")
         if price and rate:
-            r_val = float(str(rate).replace("%", "").replace(",", "") or 0)
-            sign = "+" if r_val >= 0 else ""
+            sign = "+" if item.get("compareToPreviousPrice", {}).get("name") == "RISING" else "-"
             return f"{price}pt ({sign}{rate}%)"
     except Exception:
         pass
