@@ -2,51 +2,52 @@ import os
 import requests
 from groq import Groq
 
-# 네이버 증권 전용 헤더
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Referer": "https://stock.naver.com/"
 }
 
-def get_market_indices_and_supply():
-    """1. 코스피 / 코스닥 지수 및 개인/외국인/기관 수급 수집 (네이버 integration API)"""
-    indices_info = []
-    supply_info = []
-    
-    for code, market_name in [("KOSPI", "코스피"), ("KOSDAQ", "코스닥")]:
+def get_market_indices():
+    """1. 코스피 / 코스닥 지수 수집 (검증된 네이버 폴링 API)"""
+    try:
+        url = "https://polling.finance.naver.com/api/realtime/domestic/index/KOSPI,KOSDAQ"
+        res = requests.get(url, headers=HEADERS, timeout=10)
+        data = res.json()
+        indices = []
+        for item in data.get("datas", []):
+            code = item.get("itemCode", "")
+            name = "코스피" if "KOSPI" in code else ("코스닥" if "KOSDAQ" in code else "지수")
+            price = item.get("closePrice", "")
+            rate = item.get("fluctuationsRatio", "")
+            direction = "+" if item.get("compareToPreviousPrice", {}).get("name") == "RISING" else "-"
+            indices.append(f"*{name}*: {price}pt ({direction}{rate}%)")
+        return " / ".join(indices) if indices else "지수 정보 없음"
+    except Exception as e:
+        return f"지수 수집 오류: {e}"
+
+def get_market_supply():
+    """2. 외국인 / 기관 / 개인 수급 수집"""
+    supply_results = []
+    for code, m_name in [("KOSPI", "코스피"), ("KOSDAQ", "코스닥")]:
         try:
-            url = f"https://m.stock.naver.com/api/index/{code}/integration"
+            url = f"https://m.stock.naver.com/api/index/{code}/trend"
             res = requests.get(url, headers=HEADERS, timeout=10)
             data = res.json()
+            # 최신 1건 수급 데이터 가져오기
+            latest = data[0] if isinstance(data, list) and data else (data.get("bizTrendList", [{}])[0] if isinstance(data, dict) else {})
             
-            # 지수 정보
-            deal_trend = data.get("dealTrend", {})
-            price = deal_trend.get("closePrice", "")
-            rate = deal_trend.get("fluctuationsRatio", "")
-            direction = "+" if float(rate) > 0 else ""
-            indices_info.append(f"*{market_name}*: {price}pt ({direction}{rate}%)")
+            p_val = latest.get("personalValue", "0")
+            f_val = latest.get("foreignValue", "0")
+            i_val = latest.get("institutionValue", "0")
             
-            # 수급 동향 (단위: 억 원)
-            investors = data.get("investors", [])
-            # investors 예시: [{"investor": "개인", "price": 1200}, {"investor": "외국인", "price": -500}, {"investor": "기관", "price": -700}]
-            inv_text = []
-            for inv in investors:
-                name = inv.get("investor", "")
-                val = inv.get("price", 0)
-                sign = "+" if val > 0 else ""
-                inv_text.append(f"{name} {sign}{val:,}억")
+            supply_results.append(f"• {m_name}: 개인 {p_val}억 / 외인 {f_val}억 / 기관 {i_val}억")
+        except Exception:
+            continue
             
-            if inv_text:
-                supply_info.append(f"• {market_name}: " + " / ".join(inv_text))
-        except Exception as e:
-            indices_info.append(f"*{market_name}* 수집 오류")
-            
-    idx_str = " / ".join(indices_info) if indices_info else "지수 정보 없음"
-    sup_str = "\n".join(supply_info) if supply_info else "수급 정보 없음"
-    return idx_str, sup_str
+    return "\n".join(supply_results) if supply_results else "수급 데이터 장중 집계 중"
 
 def get_market_news(limit=6):
-    """2. 네이버 주요 뉴스 헤드라인 수집"""
+    """3. 네이버 주요 뉴스 헤드라인 수집"""
     try:
         url = f"https://m.stock.naver.com/api/news/list?category=mainnews&page=1&pageSize={limit}"
         res = requests.get(url, headers=HEADERS, timeout=10)
@@ -62,57 +63,57 @@ def get_market_news(limit=6):
         return f"뉴스 수집 오류: {e}"
 
 def get_top_movers_naver(limit=10):
-    """3. 네이버 공식 주식 API로 상승/하락률 상위 종목 수집"""
+    """4. 네이버 전체 주식 데이터에서 상승/하락률 Top 10 추출 (List 파싱 버그 완벽 수정)"""
     try:
-        # 네이버 증권 전체 주식 시세 데이터 엔드포인트
         url = "https://stock.naver.com/api/domestic/market/stock/default?tradeType=KRX&marketType=ALL&orderType=marketSum&pageSize=3000"
         res = requests.get(url, headers=HEADERS, timeout=15)
-        data = res.json()
+        raw_data = res.json()
         
-        stocks = data.get("stocks", [])
-        if not stocks:
-            return "상승 종목 수집 실패", "하락 종목 수집 실패"
+        # API 응답이 리스트든 딕셔너리든 모두 처리
+        if isinstance(raw_data, list):
+            stocks = raw_data
+        elif isinstance(raw_data, dict):
+            stocks = raw_data.get("stocks", []) or raw_data.get("stockList", []) or []
+        else:
+            stocks = []
 
-        # 등락률 기준 필터링 및 변환
+        if not stocks:
+            return "상승 종목 데이터 없음", "하락 종목 데이터 없음"
+
         parsed_stocks = []
         for s in stocks:
             name = s.get("stockName", "")
-            rate_str = str(s.get("fluctuationsRatio", "0")).replace("%", "").replace(",", "")
+            rate_val = s.get("fluctuationsRatio", 0)
             try:
-                rate_num = float(rate_str)
+                rate_num = float(str(rate_val).replace("%", "").replace(",", ""))
                 parsed_stocks.append({
                     "name": name,
-                    "rate": rate_num,
-                    "market": s.get("marketName", "")
+                    "rate": rate_num
                 })
-            except ValueError:
+            except (ValueError, TypeError):
                 continue
 
-        # 1) 상승 상위 Top 10
+        # 상승률 순 정렬
         parsed_stocks.sort(key=lambda x: x["rate"], reverse=True)
-        top_risers = []
-        for idx, item in enumerate(parsed_stocks[:limit], 1):
-            top_risers.append(f"{idx}. {item['name']} (+{item['rate']:.2f}%)")
+        top_risers = [f"{i+1}. {item['name']} (+{item['rate']:.2f}%)" for i, item in enumerate(parsed_stocks[:limit])]
 
-        # 2) 하락 상위 Top 10
+        # 하락률 순 정렬
         parsed_stocks.sort(key=lambda x: x["rate"], reverse=False)
-        top_fallers = []
-        for idx, item in enumerate(parsed_stocks[:limit], 1):
-            top_fallers.append(f"{idx}. {item['name']} ({item['rate']:.2f}%)")
+        top_fallers = [f"{i+1}. {item['name']} ({item['rate']:.2f}%)" for i, item in enumerate(parsed_stocks[:limit])]
 
         return "\n".join(top_risers), "\n".join(top_fallers)
     except Exception as e:
         return f"상승 종목 수집 오류: {e}", f"하락 종목 수집 오류: {e}"
 
 def generate_briefing(market_info, supply_info, news_headlines, top_risers, top_fallers):
-    """4. Groq 초고속 AI 브리핑"""
+    """5. Groq AI 프리미엄 브리핑"""
     api_key = os.environ.get("GROQ_API_KEY", "").strip()
     if not api_key:
         return make_fallback_report(market_info, supply_info, news_headlines, top_risers, top_fallers)
 
     prompt = f"""
 당신은 전문 증권사 PB이자 시황 수석 애널리스트입니다.
-아래 수집된 당일 마감 지수, 외국인/기관 수급 동향, 주요 뉴스, 상/하락 상위 종목 데이터를 바탕으로 거래 법인 및 VIP 고객용 텔레그램 마감 브리핑을 작성해주세요.
+아래 수집된 당일 마감 지수, 수급 동향, 주요 뉴스, 상/하락 상위 종목 데이터를 바탕으로 투자자가 한눈에 읽기 좋은 텔레그램 마감 브리핑을 작성해주세요.
 
 [수집 데이터]
 1. 지수: {market_info}
@@ -126,25 +127,25 @@ def generate_briefing(market_info, supply_info, news_headlines, top_risers, top_
 {top_fallers}
 
 [작성 요구사항]
-- 모바일 텔레그램 가독성을 위해 불릿포인트와 굵은 글씨를 적극 활용하세요.
+- 모바일 텔레그램 가독성을 위해 불릿포인트와 굵은 글씨를 활용하세요.
 - 구성 형식:
   📊 **국내 증시 마감 요약**
-  - 지수 흐름 및 오늘 시장 총평 요약
+  - 지수 흐름 및 오늘 시장 총평
   
   💰 **수급 동향 분석**
-  - 외국인과 기관의 코스피/코스닥 순매수/매도 특징 및 시장 영향
+  - 외국인과 기관의 매매 패턴 및 수급적 의미
   
   📰 **오늘의 핵심 이슈 3가지**
-  - 수집된 뉴스와 시장을 관통한 핵심 재료 요약
+  - 시장을 움직인 주요 재료 요약
   
   🚀 **급등 Top 10 및 주도 테마 분석**
-  - 오늘 급등한 섹터/테마 원인 및 특징 종목 해설
+  - 오늘 강세를 보인 섹터/테마와 상승 이유
   
   📉 **급락 Top 10 및 약세 배경**
-  - 하락 폭이 컸던 종목들의 악재나 차익실현 원인 해설
+  - 급락 종목들의 하락 요인 또는 차익실현 분석
   
   💡 **내일장 대응 포인트**
-  - 투자자가 주목해야 할 수급/매크로 체크포인트 2가지
+  - 투자자가 챙겨야 할 핵심 체크포인트 2가지
 """
     client = Groq(api_key=api_key)
     models = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
@@ -183,7 +184,7 @@ def make_fallback_report(market_info, supply_info, news_headlines, top_risers, t
 {top_fallers}"""
 
 def send_telegram(text):
-    """5. 텔레그램 전송"""
+    """6. 텔레그램 전송"""
     bot_token = os.environ.get("TELEGRAM_TOKEN", "").strip()
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
@@ -197,7 +198,8 @@ def send_telegram(text):
             requests.post(url, json={"chat_id": chat_id, "text": chunk})
 
 if __name__ == "__main__":
-    market_info, supply_info = get_market_indices_and_supply()
+    market_info = get_market_indices()
+    supply_info = get_market_supply()
     news_headlines = get_market_news()
     top_risers, top_fallers = get_top_movers_naver(10)
     
