@@ -6,7 +6,7 @@ from groq import Groq
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Referer": "https://finance.naver.com/"
+    "Referer": "https://m.stock.naver.com/"
 }
 
 def get_yfinance_ticker_data(ticker_symbol):
@@ -38,62 +38,62 @@ def get_yfinance_ticker_data(ticker_symbol):
     return "집계 대기", 0.0, 0.0
 
 def get_kospi200_night_futures():
-    """코스피200 야간선물(Eurex) 한글 인코딩(CP949) 및 태그 스트리핑 기반 실제 시세 수집"""
-    
-    # 1. 네이버 증권 시세 메인 (CP949 한글 디코딩 필수)
+    """코스피200 선물 최근월물 자동 감지 및 실제 등락률 계산 (분기 만기 자동 대응)"""
+    # 1. 네이버 모바일 파생 - 거래량 1위 활성 최근월물 자동 선별
+    try:
+        url = "https://m.stock.naver.com/api/future/KOSPI200/integration"
+        res = requests.get(url, headers=HEADERS, timeout=10)
+        data = res.json()
+        item_list = data.get("itemList", []) or data.get("stockItemList", []) or data.get("futureItemList", [])
+        
+        if item_list:
+            def get_vol(item):
+                v_str = str(item.get("totalVolume", "0")).replace(",", "")
+                try:
+                    return float(v_str)
+                except ValueError:
+                    return 0.0
+
+            top_item = max(item_list, key=get_vol)
+            
+            close_str = str(top_item.get("closePrice") or top_item.get("nowPrice", "0")).replace(",", "")
+            base_str = str(top_item.get("basePrice") or top_item.get("previousClosePrice", "0")).replace(",", "")
+            
+            close_p = float(close_str)
+            base_p = float(base_str)
+            
+            if close_p > 0 and base_p > 0:
+                diff = close_p - base_p
+                calc_rate = (diff / base_p) * 100
+                sign = "+" if calc_rate >= 0 else ""
+                name = top_item.get("stockName", "코스피200선물 최근월물")
+                return f"{close_p:,.2f}pt ({sign}{calc_rate:.2f}%) [{name}]"
+    except Exception as e:
+        print(f"[선물 자동탐색 1차] {e}")
+
+    # 2. 다음(Daum) 금융 파생 API 백업
+    try:
+        daum_url = "https://finance.daum.net/api/quote/KRX:10100/summary"
+        d_headers = {"User-Agent": HEADERS["User-Agent"], "Referer": "https://finance.daum.net/"}
+        res = requests.get(daum_url, headers=d_headers, timeout=10)
+        d = res.json().get("data", {})
+        
+        trade_p = float(d.get("tradePrice", 0))
+        prev_p = float(d.get("prevClosingPrice", 0))
+        if trade_p > 0 and prev_p > 0:
+            diff = trade_p - prev_p
+            rate = (diff / prev_p) * 100
+            sign = "+" if rate >= 0 else ""
+            return f"{trade_p:,.2f}pt ({sign}{rate:.2f}%)"
+    except Exception as e:
+        print(f"[선물 자동탐색 2차] {e}")
+
+    # 3. 네이버 PC 파생 시세 메인 파싱 백업
     try:
         url = "https://finance.naver.com/sise/"
         res = requests.get(url, headers=HEADERS, timeout=10)
-        # 네이버 PC 웹페이지는 EUC-KR(CP949) 인코딩이므로 강제 변환
         html = res.content.decode("cp949", "ignore")
-        clean_text = re.sub(r'<[^>]+>', ' ', html)
-        clean_text = ' '.join(clean_text.split())
-
-        idx = clean_text.find("야간선물")
-        if idx != -1:
-            chunk = clean_text[idx:idx+150]
-            # 야간선물 텍스트 부근에서 가격(예: 350.25)과 등락률(예: +2.15% 또는 2.15%) 추출
-            price_m = re.search(r'([\d,]+\.\d{2})', chunk)
-            rate_m = re.search(r'([+-]?[\d,]+(?:\.\d+)?%)', chunk)
-            
-            if price_m and rate_m:
-                price = price_m.group(1)
-                rate = rate_m.group(1)
-                sign = "+" if ("상승" in chunk or "+" in rate) and not rate.startswith("-") else ""
-                clean_rate = rate if (rate.startswith("+") or rate.startswith("-")) else f"{sign}{rate}"
-                return f"{price}pt ({clean_rate})"
-    except Exception as e:
-        print(f"[야간선물 1차 실패] {e}")
-
-    # 2. 네이버 모바일 통합 검색 (UTF-8) 백업
-    try:
-        url = "https://m.search.naver.com/search.naver?query=%EC%BD%94%EC%8A%A4%ED%94%BC200+%EC%95%BC%EA%B0%84%EC%84%A0%EB%AC%BC"
-        m_headers = {"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15"}
-        res = requests.get(url, headers=m_headers, timeout=10)
-        clean_text = re.sub(r'<[^>]+>', ' ', res.text)
-        clean_text = ' '.join(clean_text.split())
-
-        idx = clean_text.find("야간선물")
-        if idx != -1:
-            chunk = clean_text[idx:idx+150]
-            price_m = re.search(r'([\d,]+\.\d{2})', chunk)
-            rate_m = re.search(r'([+-]?[\d,]+(?:\.\d+)?%)', chunk)
-            if price_m and rate_m:
-                price = price_m.group(1)
-                rate = rate_m.group(1)
-                sign = "+" if ("상승" in chunk or "+" in rate) and not rate.startswith("-") else ""
-                clean_rate = rate if (rate.startswith("+") or rate.startswith("-")) else f"{sign}{rate}"
-                return f"{price}pt ({clean_rate})"
-    except Exception as e:
-        print(f"[야간선물 2차 실패] {e}")
-
-    # 3. 다음(Daum) 통합 검색 백업
-    try:
-        url = "https://search.daum.net/search?w=tot&q=%EC%BD%94%EC%8A%A4%ED%94%BC200%20%EC%95%BC%EA%B0%84%EC%84%A0%EB%AC%BC"
-        res = requests.get(url, headers=HEADERS, timeout=10)
-        clean_text = re.sub(r'<[^>]+>', ' ', res.text)
-        clean_text = ' '.join(clean_text.split())
-
+        clean_text = ' '.join(re.sub(r'<[^>]+>', ' ', html).split())
         idx = clean_text.find("야간선물")
         if idx != -1:
             chunk = clean_text[idx:idx+150]
@@ -102,7 +102,7 @@ def get_kospi200_night_futures():
             if price_m and rate_m:
                 return f"{price_m.group(1)}pt ({rate_m.group(1)})"
     except Exception as e:
-        print(f"[야간선물 3차 실패] {e}")
+        print(f"[선물 자동탐색 3차] {e}")
 
     return "야간선물 집계 대기"
 
@@ -161,7 +161,7 @@ def get_us_broad_movers():
     return nasdaq_summary, dow_summary, sp500_summary
 
 def get_morning_news(limit=6):
-    """3. 장전 핵심 글로벌/증시 뉴스 헤드라인 수집"""
+    """3. 장전 핵심 글로벌 및 국내 증시 뉴스 헤드라인 수집"""
     try:
         url = f"https://m.stock.naver.com/api/news/list?category=mainnews&page=1&pageSize={limit}"
         res = requests.get(url, headers=HEADERS, timeout=10)
@@ -177,7 +177,7 @@ def get_morning_news(limit=6):
         return f"뉴스 수집 오류: {e}"
 
 def generate_morning_briefing(market_macro, nasdaq_movers, dow_movers, sp_movers, news):
-    """4. Groq 대형 모델 기반 4페이지 심층 모닝 브리핑 작성"""
+    """4. Groq 대형 모델 기반 5페이지 분할 프리미엄 모닝 브리핑 작성"""
     api_key = os.environ.get("GROQ_API_KEY", "").strip()
     if not api_key:
         return make_fallback_morning(market_macro, nasdaq_movers, dow_movers, sp_movers, news)
@@ -186,8 +186,8 @@ def generate_morning_briefing(market_macro, nasdaq_movers, dow_movers, sp_movers
     priority_models = ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]
 
     prompt = f"""
-당신은 대형 증권사 글로벌 시황 수석 애널리스트이자 프라이빗 뱅커(PB)입니다.
-아래 제공된 [수집 데이터]를 바탕으로 VIP 고객용 프리미엄 '미국 3대 지수 통합 아침 장전 브리핑'을 상세하고 깊이 있게 작성하십시오.
+당신은 대형 증권사 글로벌 시황 수석 애널리스트이자 최고 수준의 프라이빗 뱅커(PB)입니다.
+아래 제공된 [수집 데이터]를 바탕으로 VIP 고객용 프리미엄 '미국 3대 지수 통합 아침 장전 브리핑'을 매우 상세하고 격식 있게 작성하십시오.
 
 [수집 데이터 - 실제 수치 반영 필수]
 1. 글로벌 주요 지수 및 매크로 (실제 등락 수치 반드시 본문에 언급):
@@ -203,10 +203,10 @@ def generate_morning_briefing(market_macro, nasdaq_movers, dow_movers, sp_movers
 
 [작성 및 출력 지침]
 - **데이터 인용 원칙**: 위에 주어진 실제 지수/가격/등락률 수치를 본문에 직접 숫자로 인용하며 분석하십시오.
-- **코스피 야간선물 분석**: 4부에서 코스피 야간선물의 실제 수치(지수 포인트 및 등락률)를 직접 인용하여 오늘 아침 개장 갭 방향(상승/하락/보합)을 명확하게 짚어주십시오. 수치에 0.00%라고 적혀 있지 않은 한 절대로 0% 변동이라거나 보합세라고 임의 왜곡하지 마십시오.
-- **종목 언급 원칙**: 본문에서 미국 주식을 설명할 때는 반드시 티커와 실제 가격, 등락률을 함께 병기하십시오. 예: 엔비디아(NVDA, $135.20, +4.15%)
-- **글로벌 이슈 5가지**: 장전 핵심 글로벌 이슈는 반드시 1번부터 5번까지 5가지를 작성하십시오.
-- **분할 전송**: 반드시 **[SPLIT_POINT]** 구분자를 정확히 3번 출력하여 총 4개 섹션으로 나누어지도록 하십시오.
+- **코스피 야간선물 분석**: 4부에서 코스피 야간선물의 실제 수치(지수 포인트 및 등락률)를 직접 인용하여 오늘 아침 개장 갭 방향(상승/하락/보합)을 명확하게 짚어주십시오.
+- **종목 언급 원칙**: 미국 주식을 설명할 때는 반드시 티커와 실제 가격, 등락률을 함께 병기하십시오. 예: 엔비디아(NVDA, $135.20, +4.15%)
+- **글로벌 이슈 5가지**: 2부의 장전 핵심 글로벌 이슈는 반드시 1번부터 5번까지 5가지를 작성하십시오.
+- **5페이지 분할 전송**: 반드시 **[SPLIT_POINT]** 구분자를 정확히 4번 출력하여 총 5개 섹션으로 완벽히 분할되도록 하십시오. 마지막 5부까지 절대로 중간에 글이 잘리지 않도록 완결성 있게 작성하십시오.
 
 ---
 
@@ -246,7 +246,7 @@ def generate_morning_briefing(market_macro, nasdaq_movers, dow_movers, sp_movers
 
 [SPLIT_POINT]
 
-[4부: 국내 증시 개장 전망 및 실전 PB 투자 전략]
+[4부: 국내 증시 개장 전망 및 주도 테마 3선]
 🎯 **야간선물 점검 및 오늘 코스피/코스닥 개장 전망**
 - 코스피 야간 선물의 실제 수치와 등락률을 바탕으로 오늘 국내 지수 시초가 분위기(갭상승/갭하락/보합) 전망
 - 미국 증시 흐름이 오늘 장초반 국내 외국인/기관 수급에 미칠 영향 분석
@@ -254,9 +254,20 @@ def generate_morning_briefing(market_macro, nasdaq_movers, dow_movers, sp_movers
 🚀 **오늘 주목할 국내 주도 테마 3선**
 - 미 증시 강세 섹터와 연동되어 오늘 국내 증시에서 부각될 유력 테마 3가지 및 관련 수혜주
 
+[SPLIT_POINT]
+
+[5부: 오늘장 PB 실전 투자 전략 & 장전 국내 필수 체크 뉴스]
 💡 **오늘장 PB 실전 투자 전략**
-1. 장초반 시초가 갭 형성 시 매매 대응 원칙
-2. 오늘 반드시 챙겨야 할 거시 변수 및 외국인 수급 모니터링 포인트
+1. **장초반 시초가 갭 형성 시 실전 매매 대응 원칙**
+   - 갭상승 출발 시 대응 전략 (추격 매수 자제 구간 및 분할 매도 기준)
+   - 갭하락 출발 시 대응 전략 (저가 분할 매수 타이밍 및 리스크 관리선)
+2. **오늘 반드시 체크해야 할 대외 일정 및 거시 변수**
+   - 오늘 예정된 주요 경제지표 발표 일정 및 금리/환율 변수
+3. **외국인 및 기관 실시간 수급 모니터링 체크포인트**
+   - 장초반 선물 수급 변화 및 프로그램 매매 방향성에 따른 포트폴리오 관리 원칙
+
+🗞️ **장 시작 전 필독! 국내 증시 핵심 체크 뉴스**
+- 오늘 국내 장 시작 전 투자자가 반드시 주목해야 할 국내 핵심 뉴스/이슈 3가지를 선별하여 요약 정리
 """
 
     for m in priority_models:
@@ -265,13 +276,13 @@ def generate_morning_briefing(market_macro, nasdaq_movers, dow_movers, sp_movers
             response = client.chat.completions.create(
                 model=m,
                 messages=[
-                    {"role": "system", "content": "당신은 증권사 글로벌 수석 PB 애널리스트입니다. 제공된 실제 수치를 적극 활용하여 격식 있는 한국어로 전문적인 리포트를 작성하십시오. 지정된 3개의 [SPLIT_POINT]를 정확히 출력하세요."},
+                    {"role": "system", "content": "당신은 증권사 글로벌 수석 PB 애널리스트입니다. 제공된 실제 수치를 적극 활용하여 격식 있는 한국어로 전문적인 리포트를 작성하십시오. 지정된 4개의 [SPLIT_POINT]를 정확히 출력하세요."},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.3,
-                max_tokens=4000
+                max_tokens=4200
             )
-            print(f"★ 모델 [{m}] 4페이지 모닝 브리핑 생성 성공!")
+            print(f"★ 모델 [{m}] 5페이지 모닝 브리핑 생성 성공!")
             return response.choices[0].message.content
         except Exception as e:
             print(f"[{m}] 호출 실패: {e}")
@@ -290,11 +301,15 @@ def make_fallback_morning(market_macro, nasdaq_movers, dow_movers, sp_movers, ne
 {dow_movers}
 {sp_movers}
 [SPLIT_POINT]
-🗞️ **장전 주요 뉴스**
+🎯 **개장 전망**
+코스피 야간선물 수치 참조
+[SPLIT_POINT]
+💡 **오늘장 실전 전략**
+🗞️ **장전 주요 뉴스**:
 {news}"""
 
 def send_telegram(text):
-    """5. 텔레그램 4분할 안전 전송"""
+    """5. 텔레그램 5분할 안전 전송"""
     bot_token = os.environ.get("TELEGRAM_TOKEN", "").strip()
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
@@ -302,7 +317,7 @@ def send_telegram(text):
     if "[SPLIT_POINT]" in text:
         parts = text.split("[SPLIT_POINT]")
     else:
-        max_len = 2800
+        max_len = 2500
         parts = [text[i:i+max_len] for i in range(0, len(text), max_len)]
 
     for idx, part in enumerate(parts, 1):
