@@ -89,94 +89,71 @@ def get_top_movers_naver(limit=10):
         return "종목 수집 실패", "종목 수집 실패"
 
     all_stocks.sort(key=lambda x: x["rate"], reverse=True)
-    top_risers = [f"{i+1}. [{item['market']}] {item['name']} (+{item['rate']:.2f}%)" for i, item in enumerate(all_stocks[:limit])]
+    top_risers = [f"{i+1}. {item['market']} {item['name']} (+{item['rate']:.2f}%)" for i, item in enumerate(all_stocks[:limit])]
 
     all_stocks.sort(key=lambda x: x["rate"], reverse=False)
-    top_fallers = [f"{i+1}. [{item['market']}] {item['name']} ({item['rate']:.2f}%)" for i, item in enumerate(all_stocks[:limit])]
+    top_fallers = [f"{i+1}. {item['market']} {item['name']} ({item['rate']:.2f}%)" for i, item in enumerate(all_stocks[:limit])]
 
     return "\n".join(top_risers), "\n".join(top_fallers)
 
 def generate_briefing(market_info, supply_info, news_headlines, top_risers, top_fallers):
-    """5. 계정에서 사용 가능한 모델을 자동 감지하여 Groq 브리핑 생성"""
+    """5. 검증된 한국어/추론 지원 대형 모델(GPT-OSS) 기반 브리핑"""
     api_key = os.environ.get("GROQ_API_KEY", "").strip()
     if not api_key:
-        print("★ [에러] GROQ_API_KEY 환경변수가 설정되지 않았습니다.")
         return make_fallback_report(market_info, supply_info, news_headlines, top_risers, top_fallers)
 
     client = Groq(api_key=api_key)
 
-    # 1) 현재 계정에서 실제로 쓸 수 있는 활성 모델 목록 자동 조회
-    available_models = []
-    try:
-        models_data = client.models.list()
-        available_models = [m.id for m in models_data.data if "whisper" not in m.id]
-        print(f"사용 가능한 모델 목록: {available_models}")
-    except Exception as e:
-        print(f"모델 목록 조회 오류: {e}")
-
-    # 기본 후보군 (llama, gemma, mixtral 계열)
-    candidate_models = available_models + [
-        "llama-3.2-3b-preview",
-        "llama-3.2-1b-preview",
-        "gemma2-9b-it",
-        "mixtral-8x7b-32768",
-        "llama3-8b-8192",
-        "llama3-70b-8192"
+    # 한국어 처리가 우수한 최신 대형 플래그십 모델 우선 지정
+    priority_models = [
+        "openai/gpt-oss-120b",
+        "openai/gpt-oss-20b",
+        "qwen/qwen3.8-27b"
     ]
 
     prompt = f"""
-당신은 전문 증권사 PB이자 시황 수석 애널리스트입니다.
-아래 수집된 당일 마감 지수, 수급 동향, 주요 뉴스, 상/하락 상위 종목 데이터를 바탕으로 투자자가 한눈에 읽기 좋은 텔레그램 마감 브리핑을 작성해주세요.
+당신은 국내 대형 증권사 수석 PB 애널리스트입니다.
+제공된 당일 국내 증시 마감 데이터(지수, 수급, 뉴스, 상승/하락 종목)를 바탕으로 VIP 투자 고객 대상 텔레그램 마감 브리핑을 격식 있고 전문적인 한국어로 작성해주세요.
 
-[수집 데이터]
-1. 지수: {market_info}
-2. 투자자별 수급 동향:
+[마감 데이터]
+- 지수: {market_info}
+- 수급:
 {supply_info}
-3. 주요 뉴스:
+- 주요 뉴스:
 {news_headlines}
-4. 당일 상승률 Top 10:
+- 상승률 Top 10:
 {top_risers}
-5. 당일 하락률 Top 10:
+- 하락률 Top 10:
 {top_fallers}
 
-[작성 요구사항]
-- 모바일 텔레그램 가독성을 위해 불릿포인트와 굵은 글씨를 활용하세요.
-- 구성 형식:
-  📊 **국내 증시 마감 요약**
-  - 지수 흐름 및 오늘 시장 총평 요약
-  
-  💰 **수급 동향 분석**
-  - 외국인과 기관의 매매 패턴 및 수급적 특징
-  
-  📰 **오늘의 핵심 이슈 3가지**
-  - 시장을 움직인 주요 재료 요약
-  
-  🚀 **급등 Top 10 및 주도 테마 분석**
-  - 상승 상위 종목들의 특징 및 섹터 해설
-  
-  📉 **급락 Top 10 및 약세 배경**
-  - 하락 상위 종목들의 약세 요인 해설
-  
-  💡 **내일장 대응 포인트**
-  - 투자자가 챙겨야 할 핵심 체크포인트 2가지
+[작성 포맷]
+📊 **국내 증시 마감 총평**
+(지수 및 시장 흐름에 대한 핵심 요약)
+
+📰 **오늘의 핵심 이슈 3가지**
+(증시를 움직인 핵심 테마/재료 분석)
+
+🚀 **주도 섹터 및 급등주 분석**
+(상승률 상위 종목들의 특징과 배경 해설)
+
+📉 **급락 종목 및 약세 배경**
+(하락 폭이 컸던 종목들의 악재 또는 차익실현 분석)
+
+💡 **내일장 대응 포인트**
+(투자자가 주목해야 할 수급/매크로 체크포인트 2가지)
 """
 
-    # 2) 계정에 열려 있는 모델을 순서대로 호출
-    seen = set()
-    for m in candidate_models:
-        if m in seen:
-            continue
-        seen.add(m)
+    for m in priority_models:
         try:
             print(f"호출 시도 모델: {m}")
             response = client.chat.completions.create(
                 model=m,
                 messages=[
-                    {"role": "system", "content": "당신은 냉철하고 전문적인 증권사 PB 애널리스트입니다."},
+                    {"role": "system", "content": "당신은 냉철하고 전문적인 국내 증권사 PB 애널리스트입니다. 반드시 유려하고 정돈된 한국어로만 답변하십시오."},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.3,
-                max_tokens=2500
+                max_tokens=850  # Groq Free Tier의 분당 토큰 제한(1000)을 넘지 않도록 설정
             )
             print(f"★ 모델 [{m}] 브리핑 생성 성공!")
             return response.choices[0].message.content
