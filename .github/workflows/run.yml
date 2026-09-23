@@ -20,7 +20,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install requests beautifulsoup4 groq pandas lxml
+          pip install requests groq
 
       - name: Run script
         env:
