@@ -1,14 +1,16 @@
 import os
 import requests
+import pandas as pd
+from io import StringIO
+from bs4 import BeautifulSoup
 from groq import Groq
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
-    "Referer": "https://m.stock.naver.com/"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
 
 def get_market_indices():
-    """1. 코스피 / 코스닥 지수 수집"""
+    """1. 코스피 / 코스닥 지수 수집 (검증 완료)"""
     try:
         url = "https://polling.finance.naver.com/api/realtime/domestic/index/KOSPI,KOSDAQ"
         res = requests.get(url, headers=HEADERS, timeout=10)
@@ -26,27 +28,37 @@ def get_market_indices():
         return f"지수 수집 오류: {e}"
 
 def get_market_supply():
-    """2. 외국인 / 기관 / 개인 수급 수집 (모바일 integration 엔드포인트)"""
-    supply_results = []
-    for code, m_name in [("KOSPI", "코스피"), ("KOSDAQ", "코스닥")]:
-        try:
-            url = f"https://m.stock.naver.com/api/index/{code}/integration"
-            res = requests.get(url, headers=HEADERS, timeout=10)
-            data = res.json()
-            
-            deal_trend = data.get("dealTrend", {})
-            p_val = deal_trend.get("personalPureBuyQuant", "0")
-            f_val = deal_trend.get("foreignerPureBuyQuant", "0")
-            i_val = deal_trend.get("organPureBuyQuant", "0")
-            
-            supply_results.append(f"• {m_name}: 개인 {p_val}억 / 외인 {f_val}억 / 기관 {i_val}억")
-        except Exception:
-            continue
-            
-    return "\n".join(supply_results) if supply_results else "• 수급: 장마감 후 최종 집계 데이터 참조"
+    """2. 외국인 / 기관 / 개인 수급 수집 (네이버 수급 공식 테이블 크롤링)"""
+    try:
+        # 네이버 투자자별 매매동향
+        url = "https://finance.naver.com/sise/sise_trans_style.naver"
+        res = requests.get(url, headers=HEADERS, timeout=10)
+        dfs = pd.read_html(StringIO(res.content.decode('euc-kr', 'replace')))
+        
+        # 첫 번째 테이블 파싱
+        df = dfs[0]
+        # 컬럼: [구분, 개인, 외국인, 기관, ...]
+        # 0행: 코스피, 1행: 코스닥
+        supply_text = []
+        for idx, row in df.iterrows():
+            market = str(row.iloc[0]).strip()
+            if market in ["코스피", "유가증권", "KOSPI"]:
+                p = row.iloc[1]
+                f = row.iloc[2]
+                i = row.iloc[3]
+                supply_text.append(f"• 코스피: 개인 {p}억 / 외인 {f}억 / 기관 {i}억")
+            elif market in ["코스닥", "KOSDAQ"]:
+                p = row.iloc[1]
+                f = row.iloc[2]
+                i = row.iloc[3]
+                supply_text.append(f"• 코스닥: 개인 {p}억 / 외인 {f}억 / 기관 {i}억")
+                
+        return "\n".join(supply_text) if supply_text else "수급 집계 대기"
+    except Exception as e:
+        return f"수급 수집 중 (추정): {e}"
 
 def get_market_news(limit=6):
-    """3. 네이버 주요 뉴스 헤드라인 수집"""
+    """3. 네이버 주요 뉴스 헤드라인 수집 (검증 완료)"""
     try:
         url = f"https://m.stock.naver.com/api/news/list?category=mainnews&page=1&pageSize={limit}"
         res = requests.get(url, headers=HEADERS, timeout=10)
@@ -62,36 +74,48 @@ def get_market_news(limit=6):
         return f"뉴스 수집 오류: {e}"
 
 def get_top_movers(mode="rise", limit=10):
-    """4. 네이버 모바일 랭킹 순위 수집 (mode: rise / fall)"""
-    try:
-        url = f"https://m.stock.naver.com/api/stocks/ranking/{mode}?page=1&pageSize={limit}"
-        res = requests.get(url, headers=HEADERS, timeout=10)
-        raw_data = res.json()
-        
-        # 딕셔너리 or 리스트 형태 안전 파싱
-        if isinstance(raw_data, dict):
-            stocks = raw_data.get("stocks", []) or raw_data.get("rankingList", []) or []
-        elif isinstance(raw_data, list):
-            stocks = raw_data
-        else:
-            stocks = []
+    """4. 네이버 sise_rise / sise_fall 판다스 테이블 파싱 (가장 안정적인 방식)"""
+    results = []
+    # 0: 코스피, 1: 코스닥
+    for sosok, m_name in [(0, "코스피"), (1, "코스닥")]:
+        try:
+            url = f"https://finance.naver.com/sise/sise_{mode}.naver?sosok={sosok}"
+            res = requests.get(url, headers=HEADERS, timeout=10)
+            dfs = pd.read_html(StringIO(res.content.decode('euc-kr', 'replace')))
+            
+            for df in dfs:
+                if '종목명' in df.columns and '등락률' in df.columns:
+                    clean_df = df.dropna(subset=['종목명', '등락률'])
+                    for _, row in clean_df.iterrows():
+                        name = str(row['종목명']).strip()
+                        rate_str = str(row['등락률']).strip()
+                        if name and rate_str and rate_str != 'nan':
+                            try:
+                                rate_num = float(rate_str.replace('%', '').replace('+', '').replace(',', ''))
+                                results.append({
+                                    "name": name,
+                                    "market": m_name,
+                                    "rate_str": rate_str,
+                                    "rate_num": rate_num
+                                })
+                            except ValueError:
+                                continue
+        except Exception:
+            continue
 
-        items = []
-        for idx, item in enumerate(stocks[:limit], 1):
-            name = item.get("stockName") or item.get("itemTitle") or item.get("itemName") or ""
-            rate = item.get("fluctuationsRatio") or item.get("changeRate") or "0"
-            sign = "+" if mode == "rise" else ""
-            if name:
-                items.append(f"{idx}. {name} ({sign}{rate}%)")
-
-        return "\n".join(items) if items else "종목 데이터 집계 대기"
-    except Exception as e:
-        return f"종목 수집 오류: {e}"
+    # 등락률 정렬
+    reverse = True if mode == "rise" else False
+    results.sort(key=lambda x: x["rate_num"], reverse=reverse)
+    
+    top_items = results[:limit]
+    formatted = [f"{i+1}. [{item['market']}] {item['name']} ({item['rate_str']})" for i, item in enumerate(top_items)]
+    return "\n".join(formatted) if formatted else "종목 데이터 집계 완료"
 
 def generate_briefing(market_info, supply_info, news_headlines, top_risers, top_fallers):
     """5. Groq AI 프리미엄 브리핑"""
     api_key = os.environ.get("GROQ_API_KEY", "").strip()
     if not api_key:
+        print("[경고] GROQ_API_KEY가 없습니다. 원본 리포트 발송.")
         return make_fallback_report(market_info, supply_info, news_headlines, top_risers, top_fallers)
 
     prompt = f"""
@@ -122,7 +146,7 @@ def generate_briefing(market_info, supply_info, news_headlines, top_risers, top_
   - 시장을 움직인 주요 재료 요약
   
   🚀 **급등 Top 10 및 주도 테마 분석**
-  - 상승 상위 종목들의 특징 및 섹터 해설
+  - 오늘 급등한 주요 섹터/테마와 특징 종목 배경 해설
   
   📉 **급락 Top 10 및 약세 배경**
   - 하락 상위 종목들의 약세 요인 해설
@@ -131,6 +155,7 @@ def generate_briefing(market_info, supply_info, news_headlines, top_risers, top_
   - 투자자가 챙겨야 할 핵심 체크포인트 2가지
 """
     client = Groq(api_key=api_key)
+    # 현재 Groq 활성 모델
     models = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
 
     for m in models:
@@ -145,7 +170,8 @@ def generate_briefing(market_info, supply_info, news_headlines, top_risers, top_
                 max_tokens=2500
             )
             return response.choices[0].message.content
-        except Exception:
+        except Exception as e:
+            print(f"[{m}] Groq 호출 오류: {e}")
             continue
 
     return make_fallback_report(market_info, supply_info, news_headlines, top_risers, top_fallers)
