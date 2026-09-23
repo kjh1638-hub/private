@@ -42,7 +42,7 @@ def get_market_supply():
                 supply_results.append(f"• {m_name}: 개인 {p_val}억 / 외인 {f_val}억 / 기관 {i_val}억")
         except Exception:
             continue
-    return "\n".join(supply_results) if supply_results else "• 수급: 장마감 후 집계 데이터 참조"
+    return "\n".join(supply_results) if supply_results else "• 수급: 장마감 후 최종 공시 집계 참조"
 
 def get_market_news(limit=6):
     """3. 네이버 주요 뉴스 헤드라인 수집"""
@@ -97,50 +97,52 @@ def get_top_movers_naver(limit=10):
     return "\n".join(top_risers), "\n".join(top_fallers)
 
 def generate_briefing(market_info, supply_info, news_headlines, top_risers, top_fallers):
-    """5. 검증된 한국어/추론 지원 대형 모델(GPT-OSS) 기반 브리핑"""
+    """5. 고성능 모델 기반 누락 없는 프리미엄 브리핑 작성"""
     api_key = os.environ.get("GROQ_API_KEY", "").strip()
     if not api_key:
         return make_fallback_report(market_info, supply_info, news_headlines, top_risers, top_fallers)
 
     client = Groq(api_key=api_key)
 
-    # 한국어 처리가 우수한 최신 대형 플래그십 모델 우선 지정
     priority_models = [
         "openai/gpt-oss-120b",
-        "openai/gpt-oss-20b",
-        "qwen/qwen3.8-27b"
+        "openai/gpt-oss-20b"
     ]
 
     prompt = f"""
-당신은 국내 대형 증권사 수석 PB 애널리스트입니다.
-제공된 당일 국내 증시 마감 데이터(지수, 수급, 뉴스, 상승/하락 종목)를 바탕으로 VIP 투자 고객 대상 텔레그램 마감 브리핑을 격식 있고 전문적인 한국어로 작성해주세요.
+당신은 대형 증권사 수석 PB 애널리스트입니다.
+아래 수집된 당일 국내 증시 마감 데이터를 바탕으로 VIP 고객용 텔레그램 마감 브리핑을 완성도 높게 작성해주세요.
+중간에 잘리지 않도록 각 항목을 간결하고 명확하게 핵심 위주로 작성하고, **반드시 아래 6가지 섹션을 모두 포함하여 끝까지 작성**하십시오.
 
-[마감 데이터]
-- 지수: {market_info}
-- 수급:
+[수집 데이터]
+1. 지수: {market_info}
+2. 투자자별 수급:
 {supply_info}
-- 주요 뉴스:
+3. 주요 뉴스 헤드라인:
 {news_headlines}
-- 상승률 Top 10:
+4. 상승률 Top 10:
 {top_risers}
-- 하락률 Top 10:
+5. 하락률 Top 10:
 {top_fallers}
 
-[작성 포맷]
-📊 **국내 증시 마감 총평**
-(지수 및 시장 흐름에 대한 핵심 요약)
+[출력 양식]
+📊 **국내 증시 마감 요약**
+- 지수 흐름 및 오늘 시장의 전반적인 성격 요약
+
+💰 **투자자별 수급 동향**
+- 코스피/코스닥 개인, 외국인, 기관 매매 특징 및 시사점
 
 📰 **오늘의 핵심 이슈 3가지**
-(증시를 움직인 핵심 테마/재료 분석)
+- 시장에 영향을 준 주요 뉴스 3가지를 선별해 배경 요약
 
-🚀 **주도 섹터 및 급등주 분석**
-(상승률 상위 종목들의 특징과 배경 해설)
+🚀 **급등 Top 10 및 주도 테마**
+- 상승률 상위 종목들의 공통 테마(섹터) 및 핵심 상승 원인 요약 (표 대신 불릿포인트로 간결하게 정리)
 
-📉 **급락 종목 및 약세 배경**
-(하락 폭이 컸던 종목들의 악재 또는 차익실현 분석)
+📉 **급락 Top 10 및 약세 배경**
+- 하락률 상위 종목들의 공통적인 약세 요인(악재/차익실현 등) 요약
 
 💡 **내일장 대응 포인트**
-(투자자가 주목해야 할 수급/매크로 체크포인트 2가지)
+- 투자자가 주목해야 할 수급 및 거시 변수 체크포인트 2가지
 """
 
     for m in priority_models:
@@ -149,11 +151,11 @@ def generate_briefing(market_info, supply_info, news_headlines, top_risers, top_
             response = client.chat.completions.create(
                 model=m,
                 messages=[
-                    {"role": "system", "content": "당신은 냉철하고 전문적인 국내 증권사 PB 애널리스트입니다. 반드시 유려하고 정돈된 한국어로만 답변하십시오."},
+                    {"role": "system", "content": "당신은 증권사 수석 PB입니다. 모바일 가독성을 최우선으로 하여 명확하고 유려한 한국어로 작성하세요. 요청받은 모든 섹션을 빠짐없이 완성해야 합니다."},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.3,
-                max_tokens=850  # Groq Free Tier의 분당 토큰 제한(1000)을 넘지 않도록 설정
+                max_tokens=1500  # 글이 잘리지 않도록 토큰 확장
             )
             print(f"★ 모델 [{m}] 브리핑 생성 성공!")
             return response.choices[0].message.content
