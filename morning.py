@@ -6,7 +6,7 @@ from groq import Groq
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Referer": "https://m.stock.naver.com/"
+    "Referer": "https://finance.naver.com/"
 }
 
 def get_yfinance_ticker_data(ticker_symbol):
@@ -38,73 +38,58 @@ def get_yfinance_ticker_data(ticker_symbol):
     return "집계 대기", 0.0, 0.0
 
 def get_kospi200_night_futures():
-    """코스피200 선물 최근월물 자동 감지 및 실제 등락률 계산 (분기 만기 자동 대응)"""
-    # 1. 네이버 모바일 파생 - 거래량 1위 활성 최근월물 자동 선별
+    """코스피200 선물 최근월물 실제 시세 수집 (3xx.xx pt 규격 자동 파싱)"""
+    
+    # 1. 네이버 국내 파생(선물) 시가총액/시세 메인 테이블 크롤링 (가장 안정적)
     try:
-        url = "https://m.stock.naver.com/api/future/KOSPI200/integration"
+        url = "https://finance.naver.com/sise/sise_market_sum.naver?sosok=21"
         res = requests.get(url, headers=HEADERS, timeout=10)
-        data = res.json()
-        item_list = data.get("itemList", []) or data.get("stockItemList", []) or data.get("futureItemList", [])
+        html = res.content.decode("cp949", "ignore")
         
-        if item_list:
-            def get_vol(item):
-                v_str = str(item.get("totalVolume", "0")).replace(",", "")
-                try:
-                    return float(v_str)
-                except ValueError:
-                    return 0.0
-
-            top_item = max(item_list, key=get_vol)
-            
-            close_str = str(top_item.get("closePrice") or top_item.get("nowPrice", "0")).replace(",", "")
-            base_str = str(top_item.get("basePrice") or top_item.get("previousClosePrice", "0")).replace(",", "")
-            
-            close_p = float(close_str)
-            base_p = float(base_str)
-            
-            if close_p > 0 and base_p > 0:
-                diff = close_p - base_p
-                calc_rate = (diff / base_p) * 100
-                sign = "+" if calc_rate >= 0 else ""
-                name = top_item.get("stockName", "코스피200선물 최근월물")
-                return f"{close_p:,.2f}pt ({sign}{calc_rate:.2f}%) [{name}]"
+        # 선물 목록에서 가장 상단에 있는 최근월물(거래량 최상위) 추출
+        # 예: <a href="...code=101VL000...">KOSPI200 F 202612</a>
+        rows = re.findall(r'<tr[^>]*>.*?<a href="/item/main\.naver\?code=(\w+)"[^>]*>(.*?)</a>.*?<td class="number">([\d,]+\.\d{2})</td>.*?<td class="number">.*?([+-]?[\d,]+\.\d{2}%)</td>', html, re.DOTALL)
+        if rows:
+            code, name, price_str, rate_str = rows[0]
+            clean_price = price_str.strip()
+            clean_rate = rate_str.strip()
+            # 코스피200 선물 수치는 통상 200~500pt 사이임 (2000 이상 현물지수 배제)
+            val_p = float(clean_price.replace(",", ""))
+            if 200.0 <= val_p <= 600.0:
+                return f"{clean_price}pt ({clean_rate}) [{name.strip()}]"
     except Exception as e:
-        print(f"[선물 자동탐색 1차] {e}")
+        print(f"[선물 파싱 1차] {e}")
 
-    # 2. 다음(Daum) 금융 파생 API 백업
+    # 2. 네이버 PC 시세 메인 야간선물 블록 정밀 정규식 파싱
+    try:
+        url = "https://finance.naver.com/sise/"
+        res = requests.get(url, headers=HEADERS, timeout=10)
+        html = res.content.decode("cp949", "ignore")
+        
+        # '야간선물' 문구 직후 나오는 3자리 소수점 지수(200.00~599.99)와 퍼센트 추출
+        match = re.search(r'야간선물[^0-9]*([2-5]\d{2}\.\d{2})[^0-9+-]*([+-]?\d+\.\d+%)', html)
+        if match:
+            price = match.group(1)
+            rate = match.group(2)
+            return f"{price}pt ({rate}) [Eurex 야간선물]"
+    except Exception as e:
+        print(f"[선물 파싱 2차] {e}")
+
+    # 3. 다음(Daum) 금융 코스피200 선물 최근월물 REST API 백업
     try:
         daum_url = "https://finance.daum.net/api/quote/KRX:10100/summary"
         d_headers = {"User-Agent": HEADERS["User-Agent"], "Referer": "https://finance.daum.net/"}
         res = requests.get(daum_url, headers=d_headers, timeout=10)
         d = res.json().get("data", {})
-        
         trade_p = float(d.get("tradePrice", 0))
-        prev_p = float(d.get("prevClosingPrice", 0))
-        if trade_p > 0 and prev_p > 0:
-            diff = trade_p - prev_p
-            rate = (diff / prev_p) * 100
-            sign = "+" if rate >= 0 else ""
-            return f"{trade_p:,.2f}pt ({sign}{rate:.2f}%)"
+        change_rate = float(d.get("changeRate", 0)) * 100
+        sign = "+" if change_rate >= 0 else ""
+        if 200.0 <= trade_p <= 600.0:
+            return f"{trade_p:,.2f}pt ({sign}{change_rate:.2f}%) [코스피200 선물]"
     except Exception as e:
-        print(f"[선물 자동탐색 2차] {e}")
+        print(f"[선물 파싱 3차] {e}")
 
-    # 3. 네이버 PC 파생 시세 메인 파싱 백업
-    try:
-        url = "https://finance.naver.com/sise/"
-        res = requests.get(url, headers=HEADERS, timeout=10)
-        html = res.content.decode("cp949", "ignore")
-        clean_text = ' '.join(re.sub(r'<[^>]+>', ' ', html).split())
-        idx = clean_text.find("야간선물")
-        if idx != -1:
-            chunk = clean_text[idx:idx+150]
-            price_m = re.search(r'([\d,]+\.\d{2})', chunk)
-            rate_m = re.search(r'([+-]?[\d,]+(?:\.\d+)?%)', chunk)
-            if price_m and rate_m:
-                return f"{price_m.group(1)}pt ({rate_m.group(1)})"
-    except Exception as e:
-        print(f"[선물 자동탐색 3차] {e}")
-
-    return "야간선물 집계 대기"
+    return "야간선물 시세 미집계"
 
 def get_global_indices_and_macro():
     """1. 글로벌 주요 지수, 환율, 유가, 야간선물 수집"""
@@ -186,7 +171,7 @@ def generate_morning_briefing(market_macro, nasdaq_movers, dow_movers, sp_movers
     priority_models = ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]
 
     prompt = f"""
-당신은 대형 증권사 글로벌 시황 수석 애널리스트이자 최고 수준의 프라이빗 뱅커(PB)입니다.
+당신은 대형 증권사 글로벌 시황 수석 애널리스트이자 프라이빗 뱅커(PB)입니다.
 아래 제공된 [수집 데이터]를 바탕으로 VIP 고객용 프리미엄 '미국 3대 지수 통합 아침 장전 브리핑'을 매우 상세하고 격식 있게 작성하십시오.
 
 [수집 데이터 - 실제 수치 반영 필수]
@@ -203,7 +188,7 @@ def generate_morning_briefing(market_macro, nasdaq_movers, dow_movers, sp_movers
 
 [작성 및 출력 지침]
 - **데이터 인용 원칙**: 위에 주어진 실제 지수/가격/등락률 수치를 본문에 직접 숫자로 인용하며 분석하십시오.
-- **코스피 야간선물 분석**: 4부에서 코스피 야간선물의 실제 수치(지수 포인트 및 등락률)를 직접 인용하여 오늘 아침 개장 갭 방향(상승/하락/보합)을 명확하게 짚어주십시오.
+- **코스피 야간선물 주의**: 코스피 야간선물은 300~400pt 전후의 지수 선물입니다. 절대로 2,500pt 같은 코스피 현물 종합지수를 야간선물로 둔갑시키지 마십시오. 수집 데이터에 적힌 야간선물 포인트와 등락률을 그대로 인용하십시오.
 - **종목 언급 원칙**: 미국 주식을 설명할 때는 반드시 티커와 실제 가격, 등락률을 함께 병기하십시오. 예: 엔비디아(NVDA, $135.20, +4.15%)
 - **글로벌 이슈 5가지**: 2부의 장전 핵심 글로벌 이슈는 반드시 1번부터 5번까지 5가지를 작성하십시오.
 - **5페이지 분할 전송**: 반드시 **[SPLIT_POINT]** 구분자를 정확히 4번 출력하여 총 5개 섹션으로 완벽히 분할되도록 하십시오. 마지막 5부까지 절대로 중간에 글이 잘리지 않도록 완결성 있게 작성하십시오.
@@ -248,7 +233,7 @@ def generate_morning_briefing(market_macro, nasdaq_movers, dow_movers, sp_movers
 
 [4부: 국내 증시 개장 전망 및 주도 테마 3선]
 🎯 **야간선물 점검 및 오늘 코스피/코스닥 개장 전망**
-- 코스피 야간 선물의 실제 수치와 등락률을 바탕으로 오늘 국내 지수 시초가 분위기(갭상승/갭하락/보합) 전망
+- 코스피 야간선물의 실제 수치와 등락률을 바탕으로 오늘 국내 지수 시초가 분위기(갭상승/갭하락/보합) 전망
 - 미국 증시 흐름이 오늘 장초반 국내 외국인/기관 수급에 미칠 영향 분석
 
 🚀 **오늘 주목할 국내 주도 테마 3선**
@@ -256,18 +241,20 @@ def generate_morning_briefing(market_macro, nasdaq_movers, dow_movers, sp_movers
 
 [SPLIT_POINT]
 
-[5부: 오늘장 PB 실전 투자 전략 & 장전 국내 필수 체크 뉴스]
+[5부: 장전 체크 뉴스, 대외 일정 및 PB 실전 전략]
+🗞️ **장 시작 전 필독! 국내 증시 핵심 체크 뉴스**
+- 오늘 국내 장 시작 전 투자자가 반드시 주목해야 할 국내 핵심 뉴스/이슈 3가지를 선별하여 요약 정리
+
+🌐 **오늘 반드시 체크해야 할 주요 일정 및 거시 변수**
+- **해외 일정**: 미국/글로벌 주요 경제지표 발표(CPI/고용/PMI), 연준 위원 발언 등 해외 모니터링 이벤트
+- **국내 일정**: 한국은행 관련 일정, 주요 기업 실적 발표/주총, 금융당국 정책 발표 등 국내 일정
+
 💡 **오늘장 PB 실전 투자 전략**
 1. **장초반 시초가 갭 형성 시 실전 매매 대응 원칙**
    - 갭상승 출발 시 대응 전략 (추격 매수 자제 구간 및 분할 매도 기준)
    - 갭하락 출발 시 대응 전략 (저가 분할 매수 타이밍 및 리스크 관리선)
-2. **오늘 반드시 체크해야 할 대외 일정 및 거시 변수**
-   - 오늘 예정된 주요 경제지표 발표 일정 및 금리/환율 변수
-3. **외국인 및 기관 실시간 수급 모니터링 체크포인트**
+2. **외국인 및 기관 실시간 수급 모니터링 체크포인트**
    - 장초반 선물 수급 변화 및 프로그램 매매 방향성에 따른 포트폴리오 관리 원칙
-
-🗞️ **장 시작 전 필독! 국내 증시 핵심 체크 뉴스**
-- 오늘 국내 장 시작 전 투자자가 반드시 주목해야 할 국내 핵심 뉴스/이슈 3가지를 선별하여 요약 정리
 """
 
     for m in priority_models:
