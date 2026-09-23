@@ -25,11 +25,19 @@ def get_market_indices():
         return f"지수 수집 오류: {e}"
 
 def get_market_news():
-    """2. 네이버 주요 뉴스 헤드라인 수집"""
+    """2. 네이버 주요 뉴스 헤드라인 수집 (문법 오류 수정)"""
     try:
         url = "https://m.stock.naver.com/api/news/list?category=mainnews&page=1&pageSize=6"
         data = requests.get(url, headers=HEADERS, timeout=10).json()
-        titles = [f"• {item.get('tit', '').replace('&quot;', '\"').replace('&amp;', '&')}" for item in data if item.get('tit')]
+        
+        titles = []
+        for item in data:
+            tit = item.get('tit', '')
+            if tit:
+                # 백슬래시 없이 안전하게 텍스트 변환 후 리스트에 추가
+                clean_title = tit.replace('&quot;', '"').replace('&amp;', '&')
+                titles.append(f"• {clean_title}")
+                
         return "\n".join(titles) if titles else "주요 뉴스 없음"
     except Exception as e:
         return f"뉴스 수집 오류: {e}"
@@ -66,9 +74,9 @@ def generate_briefing(market_info, news_headlines, top_risers, top_fallers):
     
     [수집 데이터]
     1. 지수: {market_info}
-    2. 주요 뉴스: {news_headlines}
-    3. 상승률 Top 10: {top_risers}
-    4. 하락률 Top 10: {top_fallers}
+    2. 주요 뉴스: \n{news_headlines}
+    3. 상승률 Top 10: \n{top_risers}
+    4. 하락률 Top 10: \n{top_fallers}
     
     [구성] (불릿포인트 활용)
     📊 **시장 마감 총평**
@@ -80,6 +88,7 @@ def generate_briefing(market_info, news_headlines, top_risers, top_fallers):
     
     try:
         client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+        # 가장 안정적인 gemini-1.5-flash 모델 적용
         response = client.models.generate_content(model="gemini-1.5-flash", contents=prompt)
         if response.text:
             return response.text
@@ -107,6 +116,7 @@ def send_telegram(text):
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
 
     res = requests.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"})
+    # 마크다운 특수문자 충돌 시 일반 텍스트로 안전하게 재전송
     if res.status_code != 200:
         requests.post(url, json={"chat_id": chat_id, "text": text})
 
