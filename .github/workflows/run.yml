@@ -2,7 +2,7 @@ name: Daily Stock Briefing
 
 on:
   schedule:
-    # 평일 오후 3시 50분 (KST) 자동 실행 (UTC 기준 06:50)
+    # 평일 오후 3시 50분 (KST) 자동 실행 (UTC 06:50)
     - cron: '50 6 * * 1-5'
   workflow_dispatch:
 
