@@ -20,7 +20,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install requests groq
+          pip install requests groq yfinance
 
       - name: Run morning script
         env:
