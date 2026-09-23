@@ -1,11 +1,12 @@
 import os
+import re
 import requests
 import yfinance as yf
 from groq import Groq
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
-    "Referer": "https://m.stock.naver.com/"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Referer": "https://finance.naver.com/"
 }
 
 def get_yfinance_ticker_data(ticker_symbol):
@@ -37,46 +38,47 @@ def get_yfinance_ticker_data(ticker_symbol):
     return "집계 대기", 0.0, 0.0
 
 def get_kospi200_night_futures():
-    """야간 KOSPI200 선물(Eurex 연계) 전용 실시간 시세 수집"""
-    # 1. 네이버 모바일 야간선물 전용 시세 API
+    """코스피200 야간선물(Eurex) 최종 마감 정산값 수집 (낮 시간대에도 수치 유지)"""
+    # 1. 네이버 증권 시세 메인 화면 파싱 (가장 정확한 야간선물 최종 확정치)
     try:
-        url = "https://m.stock.naver.com/api/index/NIGHT_KOSPI200/price"
+        url = "https://finance.naver.com/sise/"
         res = requests.get(url, headers=HEADERS, timeout=10)
+        html = res.text
+        # 야간선물 텍스트 부근 매칭
+        match = re.search(r'야간선물.*?([0-9]{3}\.[0-9]{2}).*?([+-]?[0-9]+\.[0-9]+%)', html, re.DOTALL)
+        if match:
+            price = match.group(1)
+            rate = match.group(2)
+            return f"{price}pt ({rate})"
+    except Exception:
+        pass
+
+    # 2. 네이버 모바일 지표 trend API (장 마감 후에도 직전 야간 세션 유지)
+    try:
+        url_trend = "https://m.stock.naver.com/api/index/NIGHT_KOSPI200/trend"
+        res = requests.get(url_trend, headers=HEADERS, timeout=10)
         data = res.json()
-        if isinstance(data, list) and len(data) > 0:
-            latest = data[0]
+        trend_list = data.get("bizTrendList", []) if isinstance(data, dict) else []
+        if trend_list:
+            latest = trend_list[0]
             price = latest.get("closePrice")
             rate = latest.get("fluctuationsRatio")
             if price and rate:
-                r_val = float(str(rate).replace("%", "") or 0)
-                sign = "+" if r_val >= 0 else ""
+                sign = "+" if float(str(rate).replace("%", "") or 0) >= 0 else ""
                 return f"{price}pt ({sign}{rate}%)"
     except Exception:
         pass
 
-    # 2. 네이버 모바일 야간선물 상세 API
+    # 3. 네이버 파생 지수 basic API fallback
     try:
-        url = "https://m.stock.naver.com/api/future/KOSPI200_NIGHT/basic"
-        res = requests.get(url, headers=HEADERS, timeout=10)
-        data = res.json()
-        price = data.get("closePrice") or data.get("nowPrice")
-        rate = data.get("fluctuationsRatio") or data.get("changeRate")
+        url_basic = "https://m.stock.naver.com/api/future/KOSPI200_NIGHT/basic"
+        res = requests.get(url_basic, headers=HEADERS, timeout=10)
+        d = res.json()
+        price = d.get("closePrice") or d.get("nowPrice")
+        rate = d.get("fluctuationsRatio") or d.get("changeRate")
         if price and rate:
             r_val = float(str(rate).replace("%", "").replace(",", "") or 0)
             sign = "+" if r_val >= 0 else ""
-            return f"{price}pt ({sign}{rate}%)"
-    except Exception:
-        pass
-
-    # 3. 네이버 폴링 야간지표 공식 키
-    try:
-        url_night = "https://polling.finance.naver.com/api/realtime/domestic/index/NIGHT_KOSPI200"
-        res = requests.get(url_night, headers=HEADERS, timeout=10)
-        item = res.json().get("datas", [{}])[0]
-        price = item.get("closePrice")
-        rate = item.get("fluctuationsRatio")
-        if price and rate:
-            sign = "+" if item.get("compareToPreviousPrice", {}).get("name") == "RISING" else "-"
             return f"{price}pt ({sign}{rate}%)"
     except Exception:
         pass
