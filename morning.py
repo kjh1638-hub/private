@@ -37,14 +37,30 @@ def get_yfinance_ticker_data(ticker_symbol):
     return "집계 대기", 0.0, 0.0
 
 def get_kospi200_night_futures():
-    """코스피200 야간/연계선물 3중 수집"""
+    """야간 KOSPI200 선물(Eurex 연계) 전용 실시간 시세 수집"""
+    # 1. 네이버 모바일 야간선물 전용 시세 API
     try:
-        url = "https://m.stock.naver.com/api/future/KOSPI200/integration"
+        url = "https://m.stock.naver.com/api/index/NIGHT_KOSPI200/price"
         res = requests.get(url, headers=HEADERS, timeout=10)
         data = res.json()
-        fut_info = data.get("totalInfos", {}) or data.get("stockItemTotalInfos", {})
-        price = fut_info.get("closePrice") or fut_info.get("nowPrice")
-        rate = fut_info.get("fluctuationsRatio") or fut_info.get("changeRate")
+        if isinstance(data, list) and len(data) > 0:
+            latest = data[0]
+            price = latest.get("closePrice")
+            rate = latest.get("fluctuationsRatio")
+            if price and rate:
+                r_val = float(str(rate).replace("%", "") or 0)
+                sign = "+" if r_val >= 0 else ""
+                return f"{price}pt ({sign}{rate}%)"
+    except Exception:
+        pass
+
+    # 2. 네이버 모바일 야간선물 상세 API
+    try:
+        url = "https://m.stock.naver.com/api/future/KOSPI200_NIGHT/basic"
+        res = requests.get(url, headers=HEADERS, timeout=10)
+        data = res.json()
+        price = data.get("closePrice") or data.get("nowPrice")
+        rate = data.get("fluctuationsRatio") or data.get("changeRate")
         if price and rate:
             r_val = float(str(rate).replace("%", "").replace(",", "") or 0)
             sign = "+" if r_val >= 0 else ""
@@ -52,9 +68,10 @@ def get_kospi200_night_futures():
     except Exception:
         pass
 
+    # 3. 네이버 폴링 야간지표 공식 키
     try:
-        fallback_url = "https://polling.finance.naver.com/api/realtime/domestic/stock/10100"
-        res = requests.get(fallback_url, headers=HEADERS, timeout=10)
+        url_night = "https://polling.finance.naver.com/api/realtime/domestic/index/NIGHT_KOSPI200"
+        res = requests.get(url_night, headers=HEADERS, timeout=10)
         item = res.json().get("datas", [{}])[0]
         price = item.get("closePrice")
         rate = item.get("fluctuationsRatio")
@@ -64,20 +81,7 @@ def get_kospi200_night_futures():
     except Exception:
         pass
 
-    try:
-        daum_url = "https://finance.daum.net/api/quote/KRX:10100/summary"
-        headers_daum = {"User-Agent": HEADERS["User-Agent"], "Referer": "https://finance.daum.net/"}
-        res = requests.get(daum_url, headers=headers_daum, timeout=10)
-        d = res.json().get("data", {})
-        price = d.get("tradePrice")
-        rate = d.get("changeRate", 0) * 100
-        if price:
-            sign = "+" if rate >= 0 else ""
-            return f"{price:,.2f}pt ({sign}{rate:.2f}%)"
-    except Exception:
-        pass
-
-    return "장 마감 정산 집계 중"
+    return "야간선물 집계 대기"
 
 def get_global_indices_and_macro():
     """1. 글로벌 주요 지수, 환율, 유가, 야간선물 수집"""
@@ -174,7 +178,7 @@ def generate_morning_briefing(market_macro, nasdaq_movers, dow_movers, sp_movers
 {news}
 
 [작성 및 출력 지침]
-- **데이터 활용 원칙**: 절대로 "구체적인 등락 수치가 제공되지 않아 파악하기 어렵다"거나 "수치가 누락되었다"는 말을 하지 마십시오. 위에 주어진 실제 지수/가격/등락률 수치를 본문에 직접 숫자로 인용하며 분석하십시오.
+- **데이터 인용 원칙**: 절대로 "수치가 제공되지 않았다"거나 "수치가 누락되었다"는 표현을 쓰지 마십시오. 위에 주어진 실제 지수/가격/등락률 수치를 본문에 직접 숫자로 인용하며 분석하십시오.
 - **코스피 야간선물 분석**: 4부에서 코스피 야간선물의 실제 수치(지수 포인트 및 등락률)를 직접 인용하여 오늘 아침 개장 갭 방향(상승/하락/보합)을 명확하게 짚어주십시오.
 - **종목 언급 원칙**: 본문에서 미국 주식을 설명할 때는 반드시 티커와 실제 가격, 등락률을 함께 병기하십시오. 예: 엔비디아(NVDA, $135.20, +4.15%)
 - **글로벌 이슈 5가지**: 장전 핵심 글로벌 이슈는 반드시 1번부터 5번까지 5가지를 작성하십시오.
