@@ -2,138 +2,90 @@ import os
 import time
 import requests
 import pandas as pd
-from io import StringIO
+from pykrx import stock
+from datetime import datetime
 from google import genai
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 }
 
 def get_market_indices():
     """1. 코스피 / 코스닥 지수 수집"""
-    print("[1/4] 지수 수집 중...")
     try:
         url = "https://polling.finance.naver.com/api/realtime/domestic/index/KOSPI,KOSDAQ"
-        res = requests.get(url, headers=HEADERS, timeout=10)
-        data = res.json()
-        
+        data = requests.get(url, headers=HEADERS, timeout=10).json()
         indices = []
         for item in data.get("datas", []):
             code = item.get("itemCode", "")
             name = "코스피" if "KOSPI" in code else ("코스닥" if "KOSDAQ" in code else "지수")
-            price = item.get("closePrice", "")
-            change = item.get("compareToPreviousClosePrice", "")
-            rate = item.get("fluctuationsRatio", "")
-            direction = "+" if item.get("compareToPreviousPrice", {}).get("name") == "RISING" else "-"
-            indices.append(f"*{name}*: {price}pt ({direction}{rate}%, {direction}{change}pt)")
-            
+            indices.append(f"*{name}*: {item['closePrice']}pt ({item['fluctuationsRatio']}%)")
         return " / ".join(indices) if indices else "지수 정보 없음"
     except Exception as e:
-        print(f"지수 수집 오류: {e}")
-        return "코스피/코스닥 수집 일시 오류"
+        return f"지수 수집 오류: {e}"
 
-def get_market_news(limit=6):
-    """2. 주요 헤드라인 뉴스 수집"""
-    print("[2/4] 뉴스 수집 중...")
+def get_market_news():
+    """2. 네이버 주요 뉴스 헤드라인 수집"""
     try:
-        url = f"https://m.stock.naver.com/api/news/list?category=mainnews&page=1&pageSize={limit}"
-        res = requests.get(url, headers=HEADERS, timeout=10)
-        data = res.json()
-        
-        titles = []
-        for item in data:
-            title = item.get("tit", "").replace("&quot;", '"').replace("&amp;", '&')
-            if title:
-                titles.append(f"• {title}")
+        url = "https://m.stock.naver.com/api/news/list?category=mainnews&page=1&pageSize=6"
+        data = requests.get(url, headers=HEADERS, timeout=10).json()
+        titles = [f"• {item.get('tit', '').replace('&quot;', '\"').replace('&amp;', '&')}" for item in data if item.get('tit')]
         return "\n".join(titles) if titles else "주요 뉴스 없음"
     except Exception as e:
-        print(f"뉴스 수집 오류: {e}")
-        return "뉴스 수집 일시 오류"
+        return f"뉴스 수집 오류: {e}"
 
-def get_top_movers(mode="rise", limit=10):
-    """3. Pandas를 활용한 차단 우회 종목 수집"""
-    market_type = "상승률" if mode == "rise" else "하락률"
-    print(f"[3/4] {market_type} 상위 종목 수집 중...")
-    results = []
-    
-    for sosok in [0, 1]:  # 0: 코스피, 1: 코스닥
-        market_name = "코스피" if sosok == 0 else "코스닥"
-        url = f"https://finance.naver.com/sise/sise_{mode}.naver?sosok={sosok}"
-        try:
-            res = requests.get(url, headers=HEADERS, timeout=10)
-            # HTML 구조를 무시하고 표 데이터만 즉시 추출하여 에러 방지
-            dfs = pd.read_html(StringIO(res.text))
+def get_top_movers_krx(limit=10):
+    """3. 한국거래소(KRX) 공식 데이터로 상승/하락 Top 10 수집 (클라우드 차단 우회)"""
+    try:
+        today = datetime.now().strftime("%Y%m%d")
+        df = stock.get_market_price_change(today, today)
+        if df.empty:
+            df = stock.get_market_price_change_by_ticker(today)
             
-            for df in dfs:
-                if '종목명' in df.columns and '등락률' in df.columns:
-                    df = df.dropna(subset=['종목명', '등락률'])
-                    for _, row in df.iterrows():
-                        name = str(row['종목명']).strip()
-                        rate_str = str(row['등락률']).strip()
-                        try:
-                            rate_num = float(rate_str.replace('%', '').replace('+', '').replace(',', ''))
-                            results.append({
-                                "market": market_name,
-                                "name": name,
-                                "rate_str": rate_str,
-                                "rate_num": rate_num
-                            })
-                        except ValueError:
-                            continue
-                    break
-        except Exception as e:
-            print(f"{market_name} 종목 파싱 오류: {e}")
-            continue
-
-    reverse = True if mode == "rise" else False
-    results.sort(key=lambda x: x["rate_num"], reverse=reverse)
-    top_list = results[:limit]
-    
-    formatted = [f"{i+1}. [{item['market']}] {item['name']} ({item['rate_str']})" for i, item in enumerate(top_list)]
-    return "\n".join(formatted) if formatted else "종목 데이터 수집 실패"
+        df_sorted = df.sort_values(by="등락률", ascending=False)
+        
+        # 상승 상위 10
+        risers = []
+        for idx, (_, row) in enumerate(df_sorted.head(limit).iterrows(), 1):
+            risers.append(f"{idx}. {row['종목명']} (+{row['등락률']:.2f}%)")
+            
+        # 하락 상위 10
+        fallers = []
+        for idx, (_, row) in enumerate(df.sort_values(by="등락률", ascending=True).head(limit).iterrows(), 1):
+            fallers.append(f"{idx}. {row['종목명']} ({row['등락률']:.2f}%)")
+            
+        return "\n".join(risers), "\n".join(fallers)
+    except Exception as e:
+        return "상승 종목 수집 실패", "하락 종목 수집 실패"
 
 def generate_briefing(market_info, news_headlines, top_risers, top_fallers):
-    """4. 안정화된 AI 모델 브리핑 작성"""
-    print("[4/4] AI 브리핑 작성 중...")
+    """4. AI 브리핑 작성 및 서버 과부하 시 안전망 텍스트 전송"""
     prompt = f"""
     당신은 전문 증권사 PB이자 시황 수석 애널리스트입니다.
-    아래 수집된 당일 마감 지수, 주요 헤드라인 뉴스, 상/하락 10위 종목 데이터를 바탕으로 텔레그램용 마감 브리핑을 작성해주세요.
+    아래 데이터를 바탕으로 거래 법인이나 가망 고객에게 전달할 모바일 텔레그램용 마감 브리핑을 작성해주세요.
     
     [수집 데이터]
     1. 지수: {market_info}
-    2. 주요 뉴스:
-    {news_headlines}
-    3. 당일 상승률 Top 10:
-    {top_risers}
-    4. 당일 하락률 Top 10:
-    {top_fallers}
+    2. 주요 뉴스: {news_headlines}
+    3. 상승률 Top 10: {top_risers}
+    4. 하락률 Top 10: {top_fallers}
     
-    [작성 요구사항]
-    - 모바일 텔레그램 화면에서 빠르게 훑어보기 좋게 핵심만 불릿포인트와 굵은 글씨로 작성할 것
-    - 구성:
-      📊 **국내 증시 마감 요약** (지수 흐름 및 하루 시장 총평)
-      📰 **오늘의 핵심 이슈 3줄 요약** (당일 시장 핵심 재료 요약)
-      🚀 **상승률 Top 10 & 주도 테마** (수집된 종목 나열 + 섹터 상승 원인 코멘트)
-      📉 **하락률 Top 10 & 약세 요인** (수집된 종목 나열 + 하락 배경 코멘트)
-      💡 **내일장 체크포인트** (1~2줄 핵심)
+    [구성] (불릿포인트 활용)
+    📊 **시장 마감 총평**
+    📰 **오늘의 핵심 이슈 요약**
+    🚀 **상승 주도 테마 및 원인**
+    📉 **하락 테마 및 요인**
+    💡 **내일장 체크포인트**
     """
     
-    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-    
-    # 트래픽 과부하가 거의 없는 가장 안정적인 모델(1.5-flash)을 최우선으로 배치
-    models = ["gemini-1.5-flash", "gemini-3.6-flash"]
-    
-    for m in models:
-        try:
-            res = client.models.generate_content(model=m, contents=prompt)
-            if res.text:
-                print(f"-> [{m}] 모델로 브리핑 작성 성공!")
-                return res.text
-        except Exception as e:
-            print(f"[{m}] 호출 실패: {e}")
-            time.sleep(2)
-
-    print("-> 모든 AI 서버 과부하로 안전 리포트를 발송합니다.")
+    try:
+        client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+        response = client.models.generate_content(model="gemini-1.5-flash", contents=prompt)
+        if response.text:
+            return response.text
+    except Exception as e:
+        print(f"AI 서버 혼잡으로 원본 데이터 브리핑으로 대체합니다: {e}")
+        
     return f"""📊 **국내 증시 마감 리포트**
 {market_info}
 
@@ -146,7 +98,7 @@ def generate_briefing(market_info, news_headlines, top_risers, top_fallers):
 📉 **당일 하락률 Top 10**
 {top_fallers}
 
-💡 *(구글 AI 서버 일시 장애로 인해 원본 리포트가 발송되었습니다)*"""
+💡 *(구글 AI 서버 혼잡으로 수집 원본 리포트가 즉시 발송되었습니다)*"""
 
 def send_telegram(text):
     """5. 텔레그램 전송"""
@@ -157,13 +109,11 @@ def send_telegram(text):
     res = requests.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"})
     if res.status_code != 200:
         requests.post(url, json={"chat_id": chat_id, "text": text})
-    print("-> 텔레그램 발송 완료!")
 
 if __name__ == "__main__":
     market_info = get_market_indices()
-    news_headlines = get_market_news(limit=6)
-    top_risers = get_top_movers(mode="rise", limit=10)
-    top_fallers = get_top_movers(mode="fall", limit=10)
+    news_headlines = get_market_news()
+    top_risers, top_fallers = get_top_movers_krx()
     
     briefing = generate_briefing(market_info, news_headlines, top_risers, top_fallers)
     send_telegram(briefing)
